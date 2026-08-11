@@ -1,0 +1,64 @@
+version: '3.8'
+
+networks:
+  agent-memory-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: memory-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agent_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_password}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_memory_db}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - agent-memory-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agent_user} -d ${POSTGRES_DB:-agent_memory_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  memory-engine:
+    build:
+      context: ./memory_engine
+    container_name: memory-engine-api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-agent_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_password}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_memory_db}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME}
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - agent-memory-net
+
+  demo-agents:
+    build:
+      context: ./demo_agents
+    container_name: demo-agent-runner
+    environment:
+      MEMORY_ENGINE_URL: http://memory-engine:8000
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME}
+    depends_on:
+      - memory-engine
+    networks:
+      - agent-memory-net
