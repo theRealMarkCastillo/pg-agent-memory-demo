@@ -24,33 +24,31 @@ llm = ChatOpenAI(
 
 
 async def fetch_blackboard(state: AgentState) -> AgentState:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.get(
             f"{MEMORY_ENGINE_URL}/swarm/tasks/{state['workflow_id']}"
         )
         tasks = res.json()
+
+        claim_res = await client.post(
+            f"{MEMORY_ENGINE_URL}/swarm/tasks/claim-next",
+            params={
+                "agent_name": state["agent_name"],
+                "workflow_id": state["workflow_id"],
+            },
+        )
+        claim_data = claim_res.json()
 
     tasks_str = "\n".join(
         f"Task: {t['task_name']} | Status: {t['status']} | Agent: {t['assigned_agent']}"
         for t in tasks
     )
 
-    pending = [t for t in tasks if t["status"] == "PENDING"]
-    claimed_task = None
-    for t in pending:
-        claim_res = await client.post(
-            f"{MEMORY_ENGINE_URL}/swarm/tasks/claim",
-            json={
-                "task_id": t["task_id"],
-                "agent_name": state["agent_name"],
-            },
-        )
-        claim_data = claim_res.json()
-        if claim_data.get("status") == "claimed":
-            claimed_task = claim_data["task"]
-            break
+    if claim_data.get("status") == "claimed":
+        assigned_str = str(claim_data["task"])
+    else:
+        assigned_str = "No pending tasks available"
 
-    assigned_str = str(claimed_task) if claimed_task else "No pending tasks available"
     return {
         **state,
         "blackboard_state": tasks_str,

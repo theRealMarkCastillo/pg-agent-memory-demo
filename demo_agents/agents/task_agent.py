@@ -25,7 +25,7 @@ llm = ChatOpenAI(
 
 
 async def recall_past_trajectories(state: AgentState) -> AgentState:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.post(
             f"{MEMORY_ENGINE_URL}/task/trajectories/search",
             json={

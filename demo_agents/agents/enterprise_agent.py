@@ -23,7 +23,7 @@ llm = ChatOpenAI(
 
 
 async def search_policy_docs(state: AgentState) -> AgentState:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.post(
             f"{MEMORY_ENGINE_URL}/enterprise/documents/search",
             json={

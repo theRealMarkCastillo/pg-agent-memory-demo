@@ -1,16 +1,11 @@
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from typing import Optional
-from openai import AsyncOpenAI
 import os
 import json
+from embedding import get_embedding_client
 
 router = APIRouter()
-
-embedding_client = AsyncOpenAI(
-    base_url=os.getenv("EMBEDDING_BASE_URL"),
-    api_key=os.getenv("EMBEDDING_API_KEY"),
-)
 
 
 class DocumentUpsert(BaseModel):
@@ -29,7 +24,7 @@ class DocumentSearch(BaseModel):
 async def upsert_document(doc: DocumentUpsert, request: Request):
     pool = request.app.state.pool
 
-    emb_resp = await embedding_client.embeddings.create(
+    emb_resp = await get_embedding_client().embeddings.create(
         input=doc.content, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding
@@ -54,7 +49,7 @@ async def upsert_document(doc: DocumentUpsert, request: Request):
 async def search_documents(search: DocumentSearch, request: Request):
     pool = request.app.state.pool
 
-    emb_resp = await embedding_client.embeddings.create(
+    emb_resp = await get_embedding_client().embeddings.create(
         input=search.query, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding
@@ -70,7 +65,7 @@ async def search_documents(search: DocumentSearch, request: Request):
             WHERE status = 'ACTIVE'
               AND allowed_role = $3
               AND (valid_until IS NULL OR valid_until > clock_timestamp())
-              AND (embedding <=> $1::halfvec < 0.8 OR tsv @@ plainto_tsquery('english', $2))
+              AND (embedding <=> $1::halfvec < 0.5 OR tsv @@ plainto_tsquery('english', $2))
             ORDER BY rrf_score DESC
             LIMIT 10
             """,

@@ -23,7 +23,7 @@ llm = ChatOpenAI(
 
 
 async def retrieve_companion_context(state: AgentState) -> AgentState:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.get(
             f"{MEMORY_ENGINE_URL}/companion/context",
             params={"user_id": state["user_id"]},

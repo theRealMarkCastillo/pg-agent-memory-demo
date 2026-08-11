@@ -24,7 +24,7 @@ llm = ChatOpenAI(
 
 
 async def assess_skill_gaps(state: AgentState) -> AgentState:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.get(
             f"{MEMORY_ENGINE_URL}/tutor/gaps/{state['user_id']}"
         )

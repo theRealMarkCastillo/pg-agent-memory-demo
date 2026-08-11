@@ -86,6 +86,7 @@ CREATE TABLE swarm_blackboard (
     assigned_agent VARCHAR(100) NULL,
     status VARCHAR(50) DEFAULT 'PENDING',
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ DEFAULT clock_timestamp()
 );
 

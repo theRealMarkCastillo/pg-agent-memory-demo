@@ -1,16 +1,11 @@
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from typing import Optional
-from openai import AsyncOpenAI
 import os
 import json
+from embedding import get_embedding_client
 
 router = APIRouter()
-
-embedding_client = AsyncOpenAI(
-    base_url=os.getenv("EMBEDDING_BASE_URL"),
-    api_key=os.getenv("EMBEDDING_API_KEY"),
-)
 
 
 class TrajectoryStore(BaseModel):
@@ -30,7 +25,7 @@ class TrajectorySearch(BaseModel):
 async def store_trajectory(traj: TrajectoryStore, request: Request):
     pool = request.app.state.pool
 
-    emb_resp = await embedding_client.embeddings.create(
+    emb_resp = await get_embedding_client().embeddings.create(
         input=traj.goal_description, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding
@@ -56,7 +51,7 @@ async def store_trajectory(traj: TrajectoryStore, request: Request):
 async def search_trajectories(search: TrajectorySearch, request: Request):
     pool = request.app.state.pool
 
-    emb_resp = await embedding_client.embeddings.create(
+    emb_resp = await get_embedding_client().embeddings.create(
         input=search.goal_description, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding

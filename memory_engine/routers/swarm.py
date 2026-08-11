@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
-from typing import Optional
 
 router = APIRouter()
 
@@ -40,6 +39,41 @@ async def create_task(task: BlackboardTask, request: Request):
     return {"task_id": str(row["task_id"])}
 
 
+@router.post("/tasks/claim-next")
+async def claim_next_pending(agent_name: str, workflow_id: str, request: Request):
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT task_id, task_name, payload
+                FROM swarm_blackboard
+                WHERE workflow_id = $1
+                  AND status = 'PENDING'
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                workflow_id,
+            )
+
+            if not row:
+                return {"status": "no_pending_tasks"}
+
+            await conn.execute(
+                """
+                UPDATE swarm_blackboard
+                SET status = 'IN_PROGRESS', assigned_agent = $2, updated_at = clock_timestamp()
+                WHERE task_id = $1::uuid
+                """,
+                str(row["task_id"]),
+                agent_name,
+            )
+
+    return {"status": "claimed", "task": dict(row)}
+
+
 @router.post("/tasks/claim")
 async def claim_task(claim: TaskClaim, request: Request):
     pool = request.app.state.pool
@@ -58,7 +92,7 @@ async def claim_task(claim: TaskClaim, request: Request):
             )
 
             if not row:
-                return {"status": "already_claimed"}
+                return {"status": "already_claimed_or_not_found"}
 
             await conn.execute(
                 """

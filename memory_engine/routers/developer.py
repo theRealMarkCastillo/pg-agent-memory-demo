@@ -1,16 +1,11 @@
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from openai import AsyncOpenAI
 import os
 import json
+from embedding import get_embedding_client
 
 router = APIRouter()
-
-embedding_client = AsyncOpenAI(
-    base_url=os.getenv("EMBEDDING_BASE_URL"),
-    api_key=os.getenv("EMBEDDING_API_KEY"),
-)
 
 
 class SymbolUpsert(BaseModel):
@@ -34,7 +29,7 @@ class SymbolSearch(BaseModel):
 async def upsert_symbol(symbol: SymbolUpsert, request: Request):
     pool = request.app.state.pool
 
-    emb_resp = await embedding_client.embeddings.create(
+    emb_resp = await get_embedding_client().embeddings.create(
         input=symbol.code_content, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding
@@ -62,7 +57,7 @@ async def upsert_symbol(symbol: SymbolUpsert, request: Request):
 async def search_symbols(search: SymbolSearch, request: Request):
     pool = request.app.state.pool
 
-    emb_resp = await embedding_client.embeddings.create(
+    emb_resp = await get_embedding_client().embeddings.create(
         input=search.query, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding

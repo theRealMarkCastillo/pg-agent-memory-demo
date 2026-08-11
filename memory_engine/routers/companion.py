@@ -1,16 +1,11 @@
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from typing import Optional
-from openai import AsyncOpenAI
 import os
 import json
+from embedding import get_embedding_client
 
 router = APIRouter()
-
-embedding_client = AsyncOpenAI(
-    base_url=os.getenv("EMBEDDING_BASE_URL"),
-    api_key=os.getenv("EMBEDDING_API_KEY"),
-)
 
 
 class EpisodeCreate(BaseModel):
@@ -46,7 +41,7 @@ async def create_episode(ep: EpisodeCreate, request: Request):
 
         chunks = _chunk_text(ep.content, chunk_size=500)
         for chunk in chunks:
-            emb_resp = await embedding_client.embeddings.create(
+            emb_resp = await get_embedding_client().embeddings.create(
                 input=chunk, model=os.getenv("EMBEDDING_MODEL_NAME")
             )
             embedding = emb_resp.data[0].embedding
@@ -83,15 +78,21 @@ async def add_graph_fact(fact: GraphFact, request: Request):
 
         if fact.relationship_to and fact.relationship_type:
             target = await conn.fetchrow(
-                """
-                INSERT INTO companion_graph_nodes (user_id, name, entity_type)
-                VALUES ($1, $2, 'entity')
-                ON CONFLICT (user_id, name, entity_type) DO NOTHING
-                RETURNING node_id
-                """,
+                "SELECT node_id FROM companion_graph_nodes WHERE user_id = $1 AND name = $2",
                 fact.user_id,
                 fact.relationship_to,
             )
+            if not target:
+                target = await conn.fetchrow(
+                    """
+                    INSERT INTO companion_graph_nodes (user_id, name, entity_type)
+                    VALUES ($1, $2, 'entity')
+                    ON CONFLICT (user_id, name, entity_type) DO NOTHING
+                    RETURNING node_id
+                    """,
+                    fact.user_id,
+                    fact.relationship_to,
+                )
             if target:
                 await conn.execute(
                     """
@@ -177,7 +178,7 @@ async def search_episodic_context(
 ):
     pool = request.app.state.pool
 
-    emb_resp = await embedding_client.embeddings.create(
+    emb_resp = await get_embedding_client().embeddings.create(
         input=query, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding
