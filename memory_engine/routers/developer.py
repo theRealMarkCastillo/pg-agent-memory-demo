@@ -71,7 +71,6 @@ async def search_symbols(search: SymbolSearch, request: Request):
             WHERE project_id = $2
               AND git_branch = $3
               AND ($4::varchar IS NULL OR symbol_type = $4)
-              AND symbol_name % $5
             ORDER BY similarity DESC
             LIMIT 10
             """,
@@ -79,7 +78,6 @@ async def search_symbols(search: SymbolSearch, request: Request):
             search.project_id,
             search.git_branch,
             search.symbol_type,
-            search.query,
         )
 
     return [dict(r) for r in rows]
