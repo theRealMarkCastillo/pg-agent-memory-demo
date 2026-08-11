@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+import json
 
 router = APIRouter()
 
@@ -33,7 +34,7 @@ async def create_task(task: BlackboardTask, request: Request):
             """,
             task.workflow_id,
             task.task_name,
-            task.payload,
+            json.dumps(task.payload),
         )
 
     return {"task_id": str(row["task_id"])}
@@ -119,7 +120,7 @@ async def complete_task(task: TaskComplete, request: Request):
             WHERE task_id = $1::uuid
             """,
             task.task_id,
-            task.payload,
+            json.dumps(task.payload),
         )
 
     return {"status": "completed"}
