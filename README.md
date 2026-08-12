@@ -23,15 +23,16 @@ For an in-depth analysis, see **[GUIDE.md](GUIDE.md)** — a comprehensive taxon
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          DOCKER COMPOSE NETWORK                           │
-│                                                                          │
-│  ┌──────────────────┐      ┌──────────────────┐     ┌─────────────────┐ │
-│  │   demo-agents    │      │  memory-engine   │     │    postgres     │ │
-│  │   (LangGraph)    │─────>│    (FastAPI)     │────>│  (pgvector +    │ │
-│  │                  │      │                  │     │   pg_trgm)      │ │
-│  └────────┬─────────┘      └──────────────────┘     └─────────────────┘ │
-└───────────┼──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                           DOCKER COMPOSE NETWORK                              │
+│                                                                              │
+│  ┌───────────────────┐      ┌──────────────────┐      ┌──────────────────┐  │
+│  │   demo-agents     │◄────►│  memory-engine   │◄────►│    postgres      │  │
+│  │   (LangGraph)     │      │    (FastAPI)     │      │  (pgvector +     │  │
+│  │  tool calling +   │      │                  │      │   pg_trgm +      │  │
+│  │  checkpointer     │      │                  │      │  checkpointer)   │  │
+│  └────────┬──────────┘      └──────────────────┘      └──────────────────┘  │
+└───────────┼──────────────────────────────────────────────────────────────────┘
             │
             ▼ (External HTTP)
   ┌──────────────────────────────────────────┐
@@ -41,9 +42,9 @@ For an in-depth analysis, see **[GUIDE.md](GUIDE.md)** — a comprehensive taxon
 
 | Service | Role | Host Port |
 |---------|------|-----------|
-| `postgres` | PostgreSQL 16 with `vector`, `pg_trgm`, `uuid-ossp` | `5434` |
+| `postgres` | PostgreSQL 16 with `vector`, `pg_trgm`, `uuid-ossp` + LangGraph checkpoint tables | `5434` |
 | `memory-engine` | FastAPI REST API for ingestion, retrieval, and state transitions | `8001` |
-| `demo-agents` | LangGraph test runner with 6 agent implementations | — |
+| `demo-agents` | LangGraph agent runner with tool calling, write-back, and checkpointer | — |
 
 ---
 
@@ -77,7 +78,7 @@ Once running:
 - **Health check:** `curl http://localhost:8001/health`
 - **Demo output:** `docker logs -f demo-agent-runner`
 
-The `demo-agents` container seeds test data, then runs all six memory patterns sequentially and prints results.
+The `demo-agents` container seeds test data, then runs 12 demos across all six patterns — including multi-turn conversations and real execution (shell commands, HTTP requests, file operations).
 
 ---
 
@@ -106,7 +107,7 @@ LLM_MODEL_NAME=llama3.1
 
 ## Testing and Evaluation
 
-50 tests across 8 modules validate functional correctness, retrieval quality, and concurrency safety:
+54 tests across 8 modules validate functional correctness, retrieval quality, and concurrency safety:
 
 ```bash
 make up && make test        # Start engine + run full suite (~45s)
@@ -137,7 +138,7 @@ make ci                     # Build + start + test + cleanup
 ├── GUIDE.md                    # Educational deep-dive & taxonomy
 ├── RUNBOOK.md                  # Operations & troubleshooting
 ├── postgres/
-│   └── init.sql                # 11 tables, HNSW + GIN indexes, extensions
+│   └── init.sql                # 14 tables (11 pattern + 3 checkpointer), HNSW + GIN indexes
 ├── memory_engine/
 │   ├── Dockerfile
 │   ├── main.py                 # FastAPI application
@@ -152,19 +153,47 @@ make ci                     # Build + start + test + cleanup
 │       └── companion.py        # Graph facts + ephemerals + episodic chunks
 ├── demo_agents/
 │   ├── Dockerfile
-│   ├── main.py                 # Seeds data, runs all 6 demos
+│   ├── main.py                 # Seeds data, runs 12 demos (6 patterns + multi-turn + supervisor fan-out + companion lifecycle)
 │   └── agents/
-│       ├── developer_agent.py
-│       ├── task_agent.py
-│       ├── enterprise_agent.py
-│       ├── tutor_agent.py
-│       ├── swarm_agent.py
-│       └── companion_agent.py
+│       ├── __init__.py
+│       ├── checkpointer.py     # Singleton AsyncPostgresSaver (Send-safe subclass)
+│       ├── tools.py            # 19 memory tools + 4 real execution tools
+│       ├── developer_agent.py  # 3-node graph: search → agent → tools
+│       ├── task_agent.py       # 3-node graph: recall → agent → tools
+│       ├── enterprise_agent.py # 3-node graph: search → agent → tools
+│       ├── tutor_agent.py      # 3-node graph: assess → agent → tools
+│       ├── swarm_agent.py      # supervisor + Send API fan-out → workers → aggregate
+│       └── companion_agent.py  # retrieve → agent → tools + fact-extraction node
 └── tests/
     ├── conftest.py             # Shared fixtures + HTTP helpers
     ├── pytest.ini              # asyncio mode configuration
-    └── test_*.py               # 50 tests across 8 modules
+    └── test_*.py               # 54 tests across 8 modules
 ```
+
+---
+
+## Capabilities
+
+This project implements three key agent capabilities on top of the memory engine:
+
+### Tool Calling + Write-Back
+All six agents use LangGraph's `ToolNode` with bound `ChatOpenAI` models. Each agent has 2–6 tools including:
+- **Memory tools**: search and write-back to the memory engine (e.g., `search_code_symbols` + `store_code_symbol`)
+- **Real execution tools**: `execute_shell_command`, `fetch_url`, `read_file`, `write_file` (available to Developer, Task, and Swarm agents)
+
+The LLM decides when to call a tool (search memory, write back a result, execute a command), and the graph loops between the agent and tools nodes until the agent produces a final response.
+
+### Bidirectional Memory
+Agents both read from and write to the memory engine. For example:
+- **Task Agent**: recalls past trajectories, executes a task, then stores the new trajectory with a success score
+- **Swarm Agent**: claims a task from the blackboard, processes it, and marks it complete
+- **Companion Agent**: retrieves user context, responds, and stores new facts/episodes/ephemerals
+
+### Checkpointer (State Persistence)
+Every agent graph is compiled with a `PostgresSaver` checkpointer backed by a connection pool. Conversation state is persisted to PostgreSQL across invocations via `thread_id` configs. This enables:
+- Multi-turn conversations where the LLM sees previous messages
+- Fresh memory context injected each turn (updated system prompts)
+- Resumable agent runs after failures
 
 ---
 
@@ -172,22 +201,21 @@ make ci                     # Build + start + test + cleanup
 
 ### Current Limitations
 
-- **Agent graphs are linear pipelines** (2 nodes each) — they demonstrate the memory retrieval layer but not advanced LangGraph patterns (conditional routing, loops, sub-agents, Send API)
-- **Read-only agents** — agents retrieve memory but never write back; no feedback loops
-- **No tool calling** — agents simulate execution via LLM; no real function calls
-- **Single-invocation** — each demo runs once; no multi-turn conversation loops
-- **No checkpointing** — agent state is not persisted across invocations
+- **Most agent graphs are linear 3-node pipelines** — they use tool calling with conditional routing; only the Swarm pattern uses a supervisor + Send API fan-out topology
+- **No conditional routing** — agents don't yet guard against empty retrievals by routing to fallback/deny nodes
+- **No context window management** — the Companion agent ranks facts by salience + relevance, but does not yet prune by token budget
+- **Tools use synchronous HTTP** — real execution tools block the event loop; fine for a demo, not for production concurrency
 
 ### Production-Ready Enhancements
 
-| Enhancement | Patterns Affected | Description |
-|-------------|------------------|-------------|
-| **Bidirectional memory** | All | Agents write back facts, trajectories, and proficiency updates |
-| **Conditional routing** | Enterprise, Tutor | Guard against empty retrievals; route to fallback nodes |
-| **Sub-agents + Send API** | Swarm | Compose supervisor + worker subgraphs with parallel fan-out |
-| **Checkpointer** | All | Persist conversation state across invocations |
-| **Tool calling** | Task, Developer | Execute real HTTP requests, shell commands, code execution |
-| **Context window management** | Companion | Rank and prune facts when the prompt approaches token limits |
+| Enhancement | Patterns Affected | Description | Status |
+|-------------|------------------|-------------|--------|
+| **Bidirectional memory** | All | Agents write back facts, trajectories, and proficiency updates | Done |
+| **Tool calling** | All | Real HTTP requests, shell commands, file operations, code execution | Done |
+| **Checkpointer** | All | Persist conversation state across invocations via Postgres | Done |
+| **Conditional routing** | Enterprise, Tutor | Guard against empty retrievals; route to fallback nodes | Future |
+| **Sub-agents + Send API** | Swarm | Supervisor fans out to parallel worker subgraphs via Send API | Done |
+| **Context window management** | Companion | Rank facts by salience + query relevance; prune by limit | Done |
 
 See **[GUIDE.md](GUIDE.md)** for detailed architectural analysis of each pattern and production guidance.
 

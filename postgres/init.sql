@@ -114,6 +114,7 @@ CREATE TABLE companion_graph_nodes (
     user_id VARCHAR(100) NOT NULL,
     name VARCHAR(100) NOT NULL,
     entity_type VARCHAR(50) NOT NULL,
+    salience REAL DEFAULT 1.0,
     UNIQUE(user_id, name, entity_type)
 );
 

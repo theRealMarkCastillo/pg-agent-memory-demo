@@ -39,3 +39,9 @@ async def post_params(client, path, **params):
     resp = await client.post(path, params=params, headers=HEADERS)
     assert resp.status_code == 200, f"POST {path} failed ({resp.status_code}): {resp.text}"
     return resp.json()
+
+
+async def delete(client, path):
+    resp = await client.delete(path, headers=HEADERS)
+    assert resp.status_code == 200, f"DELETE {path} failed ({resp.status_code}): {resp.text}"
+    return resp.json()

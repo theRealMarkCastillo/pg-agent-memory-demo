@@ -56,6 +56,12 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL_NAME: ${LLM_MODEL_NAME}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-agent_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_password}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_memory_db}
+      WORKSPACE_DIR: /tmp/agent-workspace
     depends_on:
       - memory-engine
     networks:

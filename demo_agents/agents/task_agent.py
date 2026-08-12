@@ -1,19 +1,19 @@
 import os
-import httpx
-from typing import TypedDict
+from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
-
-MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import StateGraph, END, add_messages
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from .tools import TASK_TOOLS
+from .checkpointer import get_checkpointer
 
 
 class AgentState(TypedDict):
     agent_id: str
     goal: str
     past_trajectories: str
-    plan: str
-    execution_result: str
-    success_score: float
+    messages: Annotated[list, add_messages]
 
 
 llm = ChatOpenAI(
@@ -23,11 +23,15 @@ llm = ChatOpenAI(
     temperature=0.4,
 )
 
+llm_with_tools = llm.bind_tools(TASK_TOOLS)
 
-async def recall_past_trajectories(state: AgentState) -> AgentState:
+
+async def recall_past_trajectories(state: AgentState):
+    import httpx
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.post(
-            f"{MEMORY_ENGINE_URL}/task/trajectories/search",
+            f"{os.getenv('MEMORY_ENGINE_URL', 'http://memory-engine:8000')}/task/trajectories/search",
             json={
                 "goal_description": state["goal"],
                 "min_success_score": 0.7,
@@ -42,39 +46,65 @@ async def recall_past_trajectories(state: AgentState) -> AgentState:
             f"Actions: {t['action_sequence']}\n"
             f"Result: {t['execution_result']} (score: {t['success_score']})"
         )
-    return {**state, "past_trajectories": "\n---\n".join(parts)}
+    trajectories_str = "\n---\n".join(parts)
 
+    system_content = (
+        "You are an autonomous task agent with real execution capabilities.\n"
+        "Use search_trajectories to recall similar past tasks, then plan and execute.\n"
+        "Use execute_shell_command to run scripts and data processing.\n"
+        "Use fetch_url to make HTTP requests to APIs and websites.\n"
+        "Use read_file and write_file for data file operations.\n"
+        "After completing a task, use store_trajectory to record it in memory for future recall.\n"
+        f"Your agent ID: {state['agent_id']}\n\n"
+        f"Past Successful Trajectories:\n{trajectories_str}"
+    )
 
-async def plan_and_execute(state: AgentState) -> AgentState:
-    prompt = f"""You are an autonomous task agent. Based on past successful trajectories, plan and execute.
+    existing = state.get("messages", [])
+    if existing:
+        messages = list(existing)
+        if getattr(messages[0], "type", "") == "system":
+            messages[0] = SystemMessage(content=system_content)
+        else:
+            messages.insert(0, SystemMessage(content=system_content))
+        messages.append(HumanMessage(content=f"Goal: {state['goal']}\nPlan, execute, and store the result."))
+    else:
+        messages = [
+            SystemMessage(content=system_content),
+            HumanMessage(content=f"Goal: {state['goal']}\nPlan, execute, and store the result."),
+        ]
 
-Past Successful Trajectories:
-{state['past_trajectories']}
-
-Goal: {state['goal']}
-
-Output a JSON plan with steps and a simulated result. Reply with:
-Plan: <your step-by-step plan>
-Result: <simulated execution result>
-Success Score: <0.0 to 1.0>"""
-
-    response = await llm.ainvoke(prompt)
-    content = response.content
-
-    score = 0.9
     return {
-        **state,
-        "plan": content,
-        "execution_result": content,
-        "success_score": score,
+        "past_trajectories": trajectories_str,
+        "messages": messages,
     }
 
 
-def build_task_graph():
+async def agent_node(state: AgentState):
+    response = await llm_with_tools.ainvoke(state["messages"])
+    return {"messages": [response]}
+
+
+def should_continue(state: AgentState):
+    last = state["messages"][-1]
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        return "tools"
+    return END
+
+
+def build_task_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder = StateGraph(AgentState)
     builder.add_node("recall", recall_past_trajectories)
-    builder.add_node("execute", plan_and_execute)
+    builder.add_node("agent", agent_node)
+    builder.add_node("tools", ToolNode(TASK_TOOLS))
+
     builder.set_entry_point("recall")
-    builder.add_edge("recall", "execute")
-    builder.add_edge("execute", END)
-    return builder.compile()
+    builder.add_edge("recall", "agent")
+    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    builder.add_edge("tools", "agent")
+
+    return builder.compile(checkpointer=checkpointer)
+
+
+async def build_task_graph_with_checkpointer():
+    cp = await get_checkpointer()
+    return build_task_graph(cp)

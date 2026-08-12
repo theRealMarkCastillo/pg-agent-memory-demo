@@ -1,7 +1,7 @@
 """Tests for Companion: graph facts, TTL ephemerals, episodic search, user isolation."""
 import pytest
 import asyncio
-from conftest import post, post_params, get
+from conftest import post, post_params, get, delete
 
 USER = "companion_test_user"
 
@@ -77,3 +77,69 @@ async def test_episodic_search_ranking(client):
     if len(data) >= 2:
         scores = [r["similarity"] for r in data]
         assert scores == sorted(scores, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_salience_bumps_on_remention(client):
+    user = "salience_user"
+    await post(client, "/companion/facts",
+        user_id=user, name="Guitar", entity_type="hobby")
+    await post(client, "/companion/facts",
+        user_id=user, name="Guitar", entity_type="hobby")
+    data = await get(client, "/companion/context", user_id=user)
+    guitar = next(f for f in data["graph_facts"] if f["name"] == "Guitar")
+    assert guitar["salience"] >= 2.0, f"Salience not bumped: {guitar}"
+
+
+@pytest.mark.asyncio
+async def test_terminate_relationship(client):
+    user = "terminate_user"
+    await post(client, "/companion/facts",
+        user_id=user, name="Brooklyn", entity_type="location",
+        relationship_to="Home", relationship_type="lives_in")
+    await post(client, "/companion/facts/terminate",
+        user_id=user, name="Brooklyn", relationship_to="Home",
+        relationship_type="lives_in")
+
+    data = await get(client, "/companion/context", user_id=user)
+    brooklyn = next(f for f in data["graph_facts"] if f["name"] == "Brooklyn")
+    assert brooklyn["related_to"] is None or brooklyn["relationship_type"] is None, \
+        f"Edge not terminated: {brooklyn}"
+
+
+@pytest.mark.asyncio
+async def test_forget_user_memory(client):
+    user = "forget_user"
+    await post(client, "/companion/facts",
+        user_id=user, name="Secret", entity_type="fact")
+    await post(client, "/companion/episodes",
+        user_id=user, content="A private conversation.")
+    await post(client, "/companion/ephemerals",
+        user_id=user, description="temporary mood", ttl_seconds=3600)
+
+    data = await get(client, "/companion/context", user_id=user)
+    assert len(data["graph_facts"]) >= 1
+
+    await delete(client, f"/companion/memory/{user}")
+
+    data = await get(client, "/companion/context", user_id=user)
+    assert len(data["graph_facts"]) == 0
+    assert len(data["ephemerals"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_context_relevance_ranking_and_limit(client):
+    user = "rank_user"
+    await post(client, "/companion/facts",
+        user_id=user, name="Photography", entity_type="hobby")
+    await post(client, "/companion/facts",
+        user_id=user, name="Cooking", entity_type="hobby")
+    await post(client, "/companion/facts",
+        user_id=user, name="Hiking", entity_type="hobby")
+
+    data = await get(client, "/companion/context", user_id=user, limit=2)
+    assert len(data["graph_facts"]) == 2, f"Limit not applied: {data['graph_facts']}"
+
+    ranked = await get(client, "/companion/context", user_id=user, query="outdoors nature trails")
+    top = ranked["graph_facts"][0]["name"]
+    assert top == "Hiking", f"Relevance ranking failed, top was {top}"

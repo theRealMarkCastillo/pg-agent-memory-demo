@@ -29,9 +29,9 @@ Agent memory systems address these by externalizing state into a persistent stor
 
 ### What This Project Is — And What It Is Not
 
-**This project is** a reference implementation demonstrating how the same underlying infrastructure (PostgreSQL with pgvector and pg_trgm) can support six fundamentally different memory architectures. It runs as a self-contained Docker stack that you can inspect, modify, and benchmark.
+**This project is** a reference implementation demonstrating how the same underlying infrastructure (PostgreSQL with pgvector and pg_trgm) can support six fundamentally different memory architectures. It runs as a self-contained Docker stack that you can inspect, modify, and benchmark. Agents use **tool calling** (LangGraph `ToolNode`) for both retrieving and writing back to memory, **real execution tools** (shell, HTTP, file operations), and a **Postgres checkpointer** for persistent multi-turn conversations.
 
-**This project is not** a production-grade agent framework. The LangGraph agents are intentionally minimal (linear 2-node pipelines) to keep the focus on the memory engine — the storage, indexing, retrieval, and state transition logic in PostgreSQL. A production system would add multi-turn conversation loops, conditional routing, sub-agents, tool calling, and checkpointing on top of the memory layer demonstrated here.
+**This project is not** a production-grade agent framework. The LangGraph agents are intentionally focused on memory patterns — each uses a 3-node tool-calling graph (retrieve → agent → tools) rather than deep hierarchies. A production system would add sub-agent orchestration (supervisor/worker with Send API), context window management, and conditional routing for edge cases.
 
 ---
 
@@ -94,16 +94,23 @@ A coding assistant that understands a codebase at the symbol level — functions
 
 ### Agent Implementation
 
-The LangGraph agent is a linear 2-node pipeline: `search_code_symbols` → `generate_response`. It retrieves relevant symbols from the memory engine, formats them into a prompt, and asks the LLM to explain or use them.
+The LangGraph agent uses a **3-node tool-calling graph**: `search_code_symbols` → `agent` → `tools` (with conditional loop back to agent). The search node retrieves relevant symbols, the agent node invokes the LLM with bound tools, and the tools node executes tool calls. The LLM can choose to:
 
-**Limitations in the current implementation**: The agent does not write back new symbols (e.g., when the user adds a function), has no file system access (it can't actually read source files), and uses a hardcoded `temperature=0.3`. A production version would add: file ingestion pipelines, symbol auto-discovery via AST parsing, incremental index updates, and a chat loop with tool calling.
+- Answer directly based on retrieved symbols
+- Call `search_code_symbols` again with different parameters
+- Call `store_code_symbol` to persist a new symbol (write-back)
+- Call `read_file`, `write_file`, or `execute_shell_command` for real file and shell operations
+
+**Tools available**: `search_code_symbols`, `store_code_symbol`, `execute_shell_command`, `read_file`, `write_file`
+
+**What changed from the original**: The agent now supports bidirectional memory (write-back), real file/shell execution, and multi-turn conversations via the Postgres checkpointer.
 
 ---
 
 ## Pattern 2: Autonomous Task Memory
 
 ### Use Case
-An agent that autonomously executes multi-step tasks (web scraping, report generation, data pipeline orchestration). When given a new goal, it should recall how it succeeded at similar goals in the past and adapt those strategies.
+An agent that autonomously executes multi-step tasks (web scraping, report generation, data pipeline orchestration). When given a new goal, it should recall how it succeeded at similar goals in the past, adapt those strategies, and actually execute them.
 
 ### Memory Architecture
 
@@ -117,16 +124,24 @@ An agent that autonomously executes multi-step tasks (web scraping, report gener
 
 | Approach | Strength | Weakness | When to Use |
 |----------|----------|----------|-------------|
-| **Trajectory recall + few-shot (this project)** | Learns from past successes; scores create quality gate | Requires manual or programmatic scoring; trajectory quality degrades if scoring is noisy | Structured tasks with measurable outcomes |
+| **Trajectory recall + real tools (this project)** | Learns from past successes; actually executes tasks via shell/HTTP | Requires manual or programmatic scoring; shell access adds security concerns | Structured tasks with measurable outcomes |
 | **ReAct / Tool-using agents** | Dynamic tool selection; no historical dependency | No learning across episodes; each task starts from scratch | Tasks requiring diverse tool chains |
 | **Fine-tuned agent models** | Compresses experience into model weights; fast inference | Expensive to retrain; catastrophic forgetting | High-volume, repetitive task domains |
 | **Reflexion / self-critique loops** | Self-improving via verbal feedback; no external scoring needed | Can amplify biases; requires strong base model | OpenAI/exploratory domains without clear success metrics |
 
 ### Agent Implementation
 
-The LangGraph agent: `recall_past_trajectories` → `plan_and_execute`. The recall node queries the memory engine for similar successful trajectories, and the plan node asks the LLM to generate a plan and a simulated result.
+The LangGraph agent uses a **3-node tool-calling graph**: `recall_past_trajectories` → `agent` → `tools`. The recall node searches for similar successful trajectories, the agent node plans and decides on tools, and the tools node executes. The LLM can:
 
-**Limitations**: The `success_score` in the demo is hardcoded to 0.9 — there is no real execution or feedback loop. The plan node simulates execution rather than actually running tools. A production version would: execute real tool calls, measure actual outcomes, write back new trajectories with real success scores, and implement iterative correction when plans fail.
+- Call `search_trajectories` again if more history is needed
+- Call `execute_shell_command` to run data processing scripts
+- Call `fetch_url` to make real HTTP requests (e.g., scraping, API calls)
+- Call `read_file` / `write_file` for data I/O
+- Call `store_trajectory` to record the completed task in memory for future recall
+
+**Tools available**: `search_trajectories`, `store_trajectory`, `execute_shell_command`, `fetch_url`, `read_file`, `write_file`
+
+**What changed from the original**: The agent no longer simulates execution via the LLM. It has real execution tools and writes completed trajectories back to the memory engine, creating a genuine feedback loop.
 
 ---
 
@@ -160,9 +175,11 @@ The RRF formula `vec_score + text_score` ensures that documents matching by eith
 
 ### Agent Implementation
 
-The agent is `search_policy_docs` → `generate_response`. It passes the user's role and query to the memory engine, which filters documents server-side. The retrieved documents are formatted into a prompt and the LLM answers based only on the documents it's authorized to see.
+The LangGraph agent uses a **3-node tool-calling graph**: `search_policy_docs` → `agent` → `tools`. The search node passes the user's role and query to the memory engine, which filters documents server-side. The LLM can use `search_policy_documents` for additional lookups or `store_policy_document` to write back new policies.
 
-**Limitations**: No audit logging of document access, no JWT/session-based auth verification (the role is trusted from input), and no handling of the "no documents found" case (the LLM hallucinates instead of returning "I don't have information about that"). A production version would: integrate with an identity provider (OAuth/OIDC), log every retrieval for compliance, emit structured citations, and implement access-denied guardrails.
+**Tools available**: `search_policy_documents`, `store_policy_document`
+
+**What changed from the original**: The agent now supports write-back (storing new policy documents) and multi-turn conversations via the checkpointer.
 
 ---
 
@@ -199,16 +216,18 @@ This formula models the exponential decay of memory: a skill mastered at 1.0 dro
 
 ### Agent Implementation
 
-The agent runs `assess_skill_gaps` → `recommend_and_respond`. It queries the memory engine's `/tutor/gaps/{user_id}` endpoint, which returns all skills with their decayed scores and gap/mastered classifications. The LLM receives this data and generates a personalized lesson focused on the weakest relevant skill.
+The LangGraph agent uses a **3-node tool-calling graph**: `assess_skill_gaps` → `agent` → `tools`. It queries the memory engine's `/tutor/gaps/{user_id}` endpoint, which returns all skills with their decayed scores. The LLM can use `get_skill_gaps` to refresh the assessment and **`update_skill_progress` to write back updated proficiency** after the learner demonstrates mastery.
 
-**Limitations**: The agent never writes back updated proficiency after the lesson. The decay constant (0.95) is hardcoded. There's no adaptive routing — the agent doesn't skip review if proficiency is high, or route to prerequisites if a foundation gap is found. A production version would: close the feedback loop (assess → teach → reassess), adapt decay rates per learner, implement prerequisite-aware routing, and schedule review sessions proactively (push notifications for skills approaching gap threshold).
+**Tools available**: `get_skill_gaps`, `update_skill_progress`
+
+**What changed from the original**: The agent now closes the feedback loop — after teaching and assessing, it writes updated proficiency scores back to memory. Multi-turn conversations via the checkpointer enable iterative learning sessions.
 
 ---
 
 ## Pattern 5: Multi-Agent Swarm Memory
 
 ### Use Case
-A coordinated team of specialized agents (e.g., sentiment analysis, entity extraction, summarization) working on a shared workflow. Each agent independently claims pending tasks from a shared blackboard, executes its specialty, and marks tasks complete. No agent should claim a task that another agent already took.
+A coordinated team of specialized agents (e.g., sentiment analysis, entity extraction, summarization) working on a shared workflow. Each agent independently claims pending tasks from a shared blackboard, executes its specialty using real tools, and marks tasks complete. No agent should claim a task that another agent already took.
 
 ### Memory Architecture
 
@@ -239,17 +258,9 @@ This is a critical distinction that the current demo label ("Swarm Agent") overs
 
 | Pattern | Coordination Mechanism | LangGraph Primitive | This Demo |
 |---------|----------------------|-------------------|-----------|
-| **Swarm (this demo)** | Shared blackboard + autonomous pull; agents are equal peers with no central coordinator | Multiple independent `StateGraph` instances reading/writing the same DB-backed state | **Database only** — the agent graph is a single-node invocation; there is no multi-agent topology in LangGraph |
-| **Supervisor** | Central orchestrator that decomposes work and assigns to specialist sub-agents | `StateGraph` with subgraphs compiled into nodes; supervisor node routes via conditional edges | **Not implemented** |
+| **Swarm (this demo)** | Shared blackboard + autonomous pull; a supervisor decomposes work and fans out to parallel specialist workers | `StateGraph` + `Send` API for parallel fan-out; each worker is a tool-calling agent claiming its assigned task | **Hybrid** — LangGraph-level fan-out + database-level SKIP LOCKED claiming |
+| **Supervisor** | Central orchestrator that decomposes work and assigns to specialist sub-agents | `StateGraph` with subgraphs compiled into nodes; supervisor node routes via conditional edges | Partially implemented (single-level supervisor + Send) |
 | **Hierarchical** | Tree of supervisors, each managing a team of specialists with escalation paths | Nested `StateGraph` instances with `Send` API for fan-out to parallel workers | **Not implemented** |
-
-The current demo demonstrates the *database-level* coordination pattern (SKIP LOCKED on a shared table) — a valid and production-tested approach. To demonstrate the *LangGraph-level* multi-agent pattern, a swarm demo would need:
-
-1. A `supervisor_agent` node that decomposes a workflow into subtasks and writes them to the blackboard
-2. Multiple `worker_agent` subgraphs (specialist nodes), each compiled as a `StateGraph` and invoked in parallel using LangGraph's `Send` API
-3. A `merge_results` node that collects completed subtasks and synthesizes a final output
-
-These patterns are additive — the database blackboard mechanism demonstrated here can serve as the persistence layer for all three coordination topologies.
 
 ### Compare and Contrast
 
@@ -262,9 +273,18 @@ These patterns are additive — the database blackboard mechanism demonstrated h
 
 ### Agent Implementation
 
-The LangGraph agent runs `fetch_blackboard` → `execute_task`. It GETs the blackboard state, claims the next pending task via `/swarm/tasks/claim-next`, and asks the LLM to process it.
+The LangGraph agent uses a **supervisor + Send API fan-out** topology:
 
-**Limitations**: The demo invokes a single `StateGraph` instance — there is no actual multi-agent concurrency in the LangGraph layer. The "swarm" behavior is demonstrated at the database level (multiple agents *could* call `claim-next` in parallel and get unique tasks), but the demo runner only invokes one agent sequentially. A proper multi-agent demo would: spawn multiple `StateGraph` invocations in parallel (using `asyncio.gather`), each calling `claim-next` independently, and observe the SKIP LOCKED behavior preventing double-claims. The 50-test suite already validates this in `test_swarm.py::test_skip_locked_no_deadlock`.
+1. A `supervisor` node reads the shared blackboard and collects every PENDING task
+2. A conditional edge returns one `Send` per task, dispatching parallel worker nodes
+3. Each `worker` node is a tool-calling agent that claims its assigned task by ID, executes it with real tools, marks it complete, and reports back
+4. An `aggregate` node merges worker reports (via a reducer) into a final summary and snapshots the blackboard
+
+The workers run concurrently; safe claiming is still enforced at the database layer via `FOR UPDATE SKIP LOCKED`, so a worker can never claim a task that another worker already took.
+
+**Tools available**: `list_workflow_tasks`, `claim_next_task`, `claim_task`, `complete_swarm_task`, `execute_shell_command`, `fetch_url`
+
+**What changed from the original**: The swarm is no longer a sequence of independent agent invocations. A single supervisor invocation fans out to parallel specialist workers via the LangGraph Send API — combining LangGraph-level multi-agent topology with the DB-level SKIP LOCKED blackboard. Multi-agent concurrency is validated in the test suite (`test_skip_locked_no_deadlock`, `test_eval_swarm_concurrency`).
 
 ---
 
@@ -300,9 +320,17 @@ An AI companion or personal assistant that maintains a rich, evolving model of i
 
 ### Agent Implementation
 
-The agent runs `retrieve_companion_context` → `generate_response`. It fetches all graph facts, active ephemerals, and optional episodic search results from the memory engine, structures them into a prompt, and generates a personalized response.
+The LangGraph agent uses a **3-node tool-calling graph**: `retrieve_companion_context` → `agent` → `tools`. The retrieve node fetches all graph facts, active ephemerals, and episodic search results. The LLM can use:
 
-**Limitations**: The most significant gap is that the agent never writes back to memory. A companion that only reads memory and never updates it is an *observer*, not a *participant*. After the conversation, it should: extract new facts from the dialogue and insert graph nodes, log the conversation as a new episode, and update ephemeral states. Additionally, there's no context window management — with hundreds of facts, the prompt would overflow. Production companions need: bidirectional memory (read + write), automatic fact extraction from conversations, context pruning/ranking, and emotional state modulation in responses.
+- `get_companion_context` to refresh the user's memory state
+- `search_episodic_memory` to find semantically similar past conversations
+- `store_companion_episode` to persist a conversation in episodic memory
+- `store_companion_fact` to add new facts to the relationship graph
+- `store_companion_ephemeral` to record temporary mood/context
+
+**Tools available**: `get_companion_context`, `search_episodic_memory`, `store_companion_episode`, `store_companion_fact`, `store_companion_ephemeral`
+
+**What changed from the original**: The companion is no longer a passive observer — it writes back episodes, facts, and ephemerals after conversations, creating a true bidirectional memory loop. Multi-turn conversations via the checkpointer preserve dialogue continuity.
 
 ---
 
@@ -325,21 +353,23 @@ The agent runs `retrieve_companion_context` → `generate_response`. It fetches 
 |-----------|-----------|------|------------|-------|-------|-----------|
 | Storage tables | 1 | 1 | 1 | 2 | 1 | 5 |
 | Indexes | 2 (HNSW + GIN) | 1 (HNSW) | 2 (HNSW + GIN) | 0 | 0 | 1 (HNSW) |
-| Query complexity | Medium (filter + ANN) | Simple (ANN + range) | High (RRF + role + temporal) | Medium (CTE + decay) | Medium (lock + update) | High (3-domain join) |
-| Agent graph nodes | 2 | 2 | 2 | 2 | 2 | 2 |
-| State transitions | Read-only | Read-only | Read-only | Read-only | Read + Write | Read-only |
+| Query complexity | Medium | Simple | High | Medium | Medium | High |
+| Agent graph nodes | 3 | 3 | 3 | 3 | 3 | 3 |
+| Tools available | 5 | 6 | 2 | 2 | 5 | 5 |
+| State transitions | Read + Write | Read + Write | Read + Write | Read + Write | Read + Write | Read + Write |
 | Multi-agent capable | — | — | — | — | Yes (DB level) | — |
+| Real execution | Shell, file | Shell, HTTP, file | — | — | Shell, HTTP | — |
 
 ### When to Use Which Pattern
 
 | If your agent needs… | Use this pattern | Because… |
 |----------------------|-----------------|----------|
-| To search and understand code across projects | Developer Workspace | Branched symbol storage with hybrid semantic+symbolic search |
-| To learn from past successes and avoid repeating failures | Autonomous Task | Trajectory recall with success score quality gate |
+| To search and understand code across projects | Developer Workspace | Branched symbol storage with hybrid semantic+symbolic search + file/shell tools |
+| To learn from past successes and actually execute tasks | Autonomous Task | Trajectory recall with success score quality gate + real HTTP/shell execution |
 | To serve different internal audiences with access-controlled knowledge | Enterprise Knowledge | RRF ranking with server-side RBAC enforcement |
-| To personalize education with adaptive skill tracking | Adaptive Tutor | Skill tree with Ebbinghaus forgetting curve in SQL |
-| To coordinate multiple specialist agents on shared workflows | Multi-Agent Swarm | Blackboard pattern with SKIP LOCKED for lock-free task claiming |
-| To build a relationship with a user over time with persistent memory | AI Companion | Three-domain memory (graph + episodic + TTL ephemeral) |
+| To personalize education with adaptive skill tracking | Adaptive Tutor | Skill tree with Ebbinghaus forgetting curve in SQL + write-back feedback loop |
+| To coordinate multiple specialist agents on shared workflows | Multi-Agent Swarm | Supervisor + Send API fan-out with SKIP LOCKED blackboard claiming + execution tools |
+| To build a relationship with a user over time with persistent memory | AI Companion | Three-domain memory (graph + episodic + TTL ephemeral) + bidirectional write-back |
 
 ---
 
@@ -347,35 +377,39 @@ The agent runs `retrieve_companion_context` → `generate_response`. It fetches 
 
 ### Current State
 
-Every LangGraph agent in this project is a **linear 2-node pipeline**: a retrieval node fetches data from the memory engine, and a generation node passes it to the LLM. This was an intentional design choice to keep the focus on the memory infrastructure layer. No agent uses:
+Every LangGraph agent in this project is a **3-node tool-calling pipeline** with conditional routing:
 
-- **Conditional edges** — no branching based on state
-- **Loops/cycles** — no iterative refinement or conversation turns
-- **Subgraphs** — no composed agent hierarchies
-- **Send API** — no parallel fan-out to workers
+```
+entry node → agent (LLM + tools) → [conditional: tool_calls?] → tools → agent → END
+```
+
+The entry node retrieves memory context from the API, the agent node invokes the LLM with bound tools, and the tools node (`ToolNode`) executes tool calls. A conditional edge checks for `tool_calls` on the last message — if tools were called, the graph loops back to the agent for follow-up; otherwise it ends.
+
+**This project uses**:
+- **ToolNode** — tool calling and function execution via `langgraph.prebuilt`
+- **Conditional edges** — branching based on whether the LLM requested tools
+- **Loops/cycles** — agent → tools → agent iteration for multi-step tool sequences
+- **Checkpointer** — Postgres-backed state persistence via `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`
+- **Bidirectional memory** — all agents can both read from and write to the memory engine
+- **Send API** — the Swarm pattern fans out from a supervisor to parallel worker nodes
+
+**This project does not yet use**:
+- **Subgraphs** — no composed agent hierarchies (the Swarm supervisor uses nodes, not compiled subgraphs)
 - **Interrupt/Command** — no human-in-the-loop or dynamic routing
-- **Checkpointer** — no persistence of agent state across invocations
-- **ToolNode** — no tool calling or function execution
-
-This means every agent is a **single-shot RAG pipeline** rather than an autonomous, multi-step agent. The LangGraph framework is vastly underutilized.
 
 ### What a Production-Grade Implementation Would Add
 
 For each agent to become production-ready using LangGraph's full capabilities:
 
-**Developer Agent**: Add a `ChatOpenAI` tool-calling node that can create new symbols (write back to memory), a conditional edge that checks "did we find relevant symbols?" before routing to generation or to a fallback node, and a checkpointer for multi-turn sessions.
+**Developer Agent**: Add AST-based symbol auto-discovery (tool that parses Python/JS files), incremental index updates, and a conditional edge that checks "did we find relevant symbols?" before routing.
 
-**Task Agent**: Implement `ToolNode` with real tools (HTTP requests, code execution), add a reflexion loop (`planning` → `execution` → `evaluation` → `replan` via conditional edges), and write completed trajectories back to the memory engine.
+**Task Agent**: Already has real execution tools. Add a reflexion loop (`planning` → `execution` → `evaluation` → `replan` via conditional edges) and automatic success scoring of executed tasks.
 
 **Enterprise Agent**: Add a conditional guardrail node (`search` → `has_results?` → `generate` or `deny`), implement citation chaining via tool calls, and add an audit logging node that records every retrieval.
 
-**Tutor Agent**: Implement a multi-turn loop with progress updates (write decaded scores back), add prerequisite routing via conditional edges (if `algebra` is a gap, route to `algebra_lesson` before `calculus_lesson`), and schedule future reviews.
+**Tutor Agent**: Implement prerequisite-aware routing via conditional edges (if `algebra` is a gap, route to `algebra_lesson` before `calculus_lesson`), and adaptive decay rates per learner.
 
-**Swarm Agent**: This is the agent that benefits most from proper LangGraph usage. A proper swarm implementation would:
-1. Compile a **supervisor graph** with a `Send` node that fans out to multiple worker subgraphs
-2. Each worker subgraph independently invokes `claim-next` against the blackboard
-3. A `merge` node collects results and produces a final summary
-4. All workers share a checkpointer for state coordination
+**Swarm Agent**: Already has a supervisor + Send API fan-out. A further production upgrade would compile each worker as a subgraph, add a merge/rollback policy for failed workers, and support nested hierarchies (supervisors of supervisors) with escalation paths.
 
 **Companion Agent**: Add a fact extraction node that analyzes the conversation and writes new graph nodes/edges, an importance scorer that curates the context window when facts exceed limits, and a personality modulator that adjusts tone based on ephemeral emotional state.
 
@@ -391,7 +425,7 @@ Building the memory engine first — before adding complex agent graph logic —
 Add LangSmith/LangFuse callbacks to trace retrieval-to-generation pipelines. Log every memory engine query with timing, result count, and error codes.
 
 ### Testing and Evaluation
-The 50-test suite in `tests/` validates functional correctness. For production, add:
+The 54-test suite in `tests/` validates functional correctness. For production, add:
 - **Retrieval quality evals**: Precision@K and NDCG for each pattern using labeled query→document pairs
 - **Concurrency stress tests**: 100+ parallel swarm agents claiming tasks under load
 - **Decay accuracy tests**: Pre-compute expected decayed scores and assert within tolerance
