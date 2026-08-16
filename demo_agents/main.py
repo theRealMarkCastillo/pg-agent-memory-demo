@@ -161,6 +161,26 @@ async def seed_data(client: httpx.AsyncClient):
         },
     )
 
+    await client.post(
+        f"{MEMORY_ENGINE_URL}/companion/backstory",
+        json={
+            "user_id": "usr_anthony",
+            "name": "Iris",
+            "backstory": [
+                {"name": "Iris", "entity_type": "self",
+                 "relationship_to": "a quiet coastal town", "relationship_type": "lives_in"},
+                {"name": "Iris", "entity_type": "self",
+                 "relationship_to": "long conversations", "relationship_type": "values"},
+                {"name": "Iris", "entity_type": "self",
+                 "relationship_to": "poetry", "relationship_type": "writes"},
+            ],
+            "shared": [
+                {"name": "Iris", "entity_type": "self",
+                 "relationship_to": "usr_anthony", "relationship_type": "trusts"},
+            ],
+        },
+    )
+
     print("Seed data inserted.\n")
 
 

@@ -124,6 +124,14 @@ All tables are created by `postgres/init.sql` at first launch. Tables per patter
 | Companion | `companion_episodes`, `companion_chunks`, `companion_graph_nodes`, `companion_graph_edges`, `companion_ephemerals` |
 | Checkpointer | `checkpoints`, `checkpoint_writes`, `checkpoint_blobs` |
 
+Companion graph columns:
+
+| Table | Key Columns | Notes |
+|-------|-------------|-------|
+| `companion_graph_nodes` | `user_id`, `name`, `entity_type`, `salience`, `normalize_name_key`, `subject` | `subject` ∈ `user`/`self`/`shared`; unique on `(user_id, name, entity_type, subject)` |
+| `companion_graph_edges` | `user_id`, `source_node_id`, `target_node_id`, `relationship_type`, `status`, `valid_until`, `subject`, `valence`, `intensity`, `source_episode_id` | `valence` −1…1, `intensity` 0…1; `source_episode_id` = provenance link |
+| `companion_episodes` | `episode_id`, `user_id`, `content` | Linked from edges for provenance |
+
 ## Ports Reference
 
 | Service | Internal (container) | External (host) |
@@ -156,6 +164,49 @@ supervisor → [Send per pending task] → worker (claim → execute → complet
 | Swarm | `supervisor` (Send API) | 6 (list + claim-next + claim + complete + shell + HTTP) | Yes |
 | Companion | `retrieve_companion_context` | 7 (context + search + episode + fact + ephemeral + terminate + forget) | Yes |
 
+The Companion graph has four nodes — the standard `retrieve → agent → tools` loop plus a **3-scope extraction node**:
+
+```
+retrieve (user + self + shared facts, common ground) → agent → [tools] → extract (user_facts / self_facts / shared_facts + valence + provenance) → END
+```
+
+The extraction node creates the episode first, then posts every fact (user/self/shared) with its subject, emotional `valence`/`intensity`, and a `source_episode_id` so each fact is traceable to where it was learned. A backstory (`POST /companion/backstory`) pre-seeds the self-model per user.
+
+## Companion Memory Tooling (`tools/`)
+
+The `tools/` directory contains a standalone pipeline for testing companion memory with real LangSmith traces or synthetic data. It requires `httpx` + `openai` (a `.venv` at the repo root works):
+
+```bash
+python -m venv .venv && .venv/bin/pip install httpx openai asyncpg pytest pytest-asyncio
+```
+
+**Synthetic (deterministic, no external API):**
+```bash
+.venv/bin/python tools/generate_synthetic.py --count 20 --out traces_synthetic
+.venv/bin/python tools/benchmark_extraction.py --traces-dir traces_synthetic --all
+.venv/bin/python tools/cleanup_replay.py --all-replay
+```
+
+**Real LangSmith traces (needs `LANGSMITH_API_KEY` in `.env`):**
+```bash
+.venv/bin/python tools/pull_conversations.py --project eidolon-prod --out /tmp/conv
+.venv/bin/python tools/parse_traces.py /tmp/conv            # inspect parsed turns
+.venv/bin/python tools/benchmark_extraction.py --traces-dir /tmp/conv --sample 30
+```
+
+Tool overview:
+
+| Tool | Purpose |
+|------|---------|
+| `pull_langsmith_traces.py` | Pull top-level LangSmith traces for a project |
+| `pull_conversations.py` | Paginated, resumable pull of conversation traces (dedupes by trace_id) |
+| `parse_traces.py` | Parse LangGraph / RunnableSequence / MasterGraph traces into turns |
+| `replay_traces.py` | Replay conversations through companion extraction → memory engine |
+| `eval_recall.py` | Probe `/companion/context` for recall |
+| `benchmark_extraction.py` | Precision/recall/F1 vs production ground-truth facts |
+| `generate_synthetic.py` | Generate synthetic conversations with known ground truth |
+| `cleanup_replay.py` | Forget replay/test users |
+
 ## Useful Database Queries
 
 Exec into the postgres container:
@@ -170,6 +221,31 @@ Inspect tables:
 SELECT COUNT(*) FROM companion_chunks;
 SELECT * FROM swarm_blackboard ORDER BY updated_at DESC LIMIT 5;
 SELECT skill_name, decayed_score FROM ( /* paste tutor gap query from init.sql */ );
+```
+
+Inspect companion self-model / shared / provenance:
+```sql
+-- every fact grouped by subject
+SELECT subject, count(*) FROM companion_graph_nodes GROUP BY subject;
+
+-- the companion's self-model (subject='self')
+SELECT n.name, e.relationship_type, e.valence, e.intensity
+FROM companion_graph_nodes n
+JOIN companion_graph_edges e ON n.node_id = e.source_node_id
+WHERE n.user_id = 'usr_anthony' AND n.subject = 'self' AND e.status = 'ACTIVE';
+
+-- facts with emotional weight
+SELECT source.name, e.relationship_type, e.valence, e.intensity
+FROM companion_graph_edges e
+JOIN companion_graph_nodes source ON source.node_id = e.source_node_id
+WHERE e.user_id = 'usr_anthony' AND e.valence < -0.5;
+
+-- provenance: fact → source episode
+SELECT s.name, e.relationship_type, ep.content AS source_episode
+FROM companion_graph_edges e
+JOIN companion_graph_nodes s ON s.node_id = e.source_node_id
+LEFT JOIN companion_episodes ep ON ep.episode_id = e.source_episode_id
+WHERE e.user_id = 'usr_anthony' AND e.source_episode_id IS NOT NULL;
 ```
 
 View checkpointed agent state:

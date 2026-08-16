@@ -115,7 +115,10 @@ CREATE TABLE companion_graph_nodes (
     name VARCHAR(100) NOT NULL,
     entity_type VARCHAR(50) NOT NULL,
     salience REAL DEFAULT 1.0,
-    UNIQUE(user_id, name, entity_type)
+    normalize_name_key VARCHAR(100) NOT NULL,
+    subject VARCHAR(20) DEFAULT 'user',  -- 'user' | 'self' | 'shared'
+    UNIQUE(user_id, name, entity_type, subject),
+    UNIQUE(user_id, normalize_name_key, subject)
 );
 
 CREATE TABLE companion_graph_edges (
@@ -125,7 +128,12 @@ CREATE TABLE companion_graph_edges (
     target_node_id UUID REFERENCES companion_graph_nodes(node_id),
     relationship_type VARCHAR(50) NOT NULL,
     status VARCHAR(20) DEFAULT 'ACTIVE',
-    valid_until TIMESTAMPTZ NULL
+    valid_until TIMESTAMPTZ NULL,
+    subject VARCHAR(20) DEFAULT 'user',  -- inherited from source node
+    valence REAL DEFAULT 0.0,             -- -1.0 (negative) .. +1.0 (positive); 0 = neutral
+    intensity REAL DEFAULT 0.5,           -- 0.0 .. 1.0 emotional intensity
+    source_episode_id UUID REFERENCES companion_episodes(episode_id),  -- provenance
+    UNIQUE(user_id, source_node_id, target_node_id, relationship_type, subject)
 );
 
 CREATE TABLE companion_ephemerals (

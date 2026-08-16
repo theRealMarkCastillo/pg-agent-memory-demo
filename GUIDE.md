@@ -31,7 +31,7 @@ Agent memory systems address these by externalizing state into a persistent stor
 
 **This project is** a reference implementation demonstrating how the same underlying infrastructure (PostgreSQL with pgvector and pg_trgm) can support six fundamentally different memory architectures. It runs as a self-contained Docker stack that you can inspect, modify, and benchmark. Agents use **tool calling** (LangGraph `ToolNode`) for both retrieving and writing back to memory, **real execution tools** (shell, HTTP, file operations), and a **Postgres checkpointer** for persistent multi-turn conversations.
 
-**This project is not** a production-grade agent framework. The LangGraph agents are intentionally focused on memory patterns — each uses a 3-node tool-calling graph (retrieve → agent → tools) rather than deep hierarchies. A production system would add sub-agent orchestration (supervisor/worker with Send API), context window management, and conditional routing for edge cases.
+**This project is not** a production-grade agent framework. The LangGraph agents are intentionally focused on memory patterns — most use a 3-node tool-calling graph (retrieve → agent → tools) rather than deep hierarchies, and the Companion adds a fourth 3-scope extraction node. A production system would add sub-agent orchestration (supervisor/worker with Send API), context window management, and conditional routing for edge cases.
 
 ---
 
@@ -305,9 +305,19 @@ An AI companion or personal assistant that maintains a rich, evolving model of i
 
 **Graph Model**: Entities (`companion_graph_nodes`) are connected by typed, directed edges (`companion_graph_edges`). Edges can be terminated by setting `status='INACTIVE'` or `valid_until` — this implements bitemporal state, where a fact has both a real-world validity period and a database-level status flag. For example, "Alice WORKS_AT CompanyX" can be marked inactive when she changes jobs, but the historical fact remains queryable for past-date context.
 
+**Three-Subject Model**: Every node and edge carries a `subject` column — `user`, `self`, or `shared`:
+
+- **`user`** — durable facts the user revealed ("Alice LIVES_IN Brooklyn")
+- **`self`** — the companion's model of **itself**, extracted from its own outputs ("Iris VALUES honesty", "Iris WRITES poetry"). A backstory endpoint (`POST /companion/backstory`) pre-seeds this per user so the companion starts with a persona and grows from conversation.
+- **`shared`** — relationship facts belonging to both ("we SHARE_RITUAL morning coffee", "Vesper TRUSTS Alice"), the memory of the bond growing together.
+
+Because both sides live in one graph, the retrieve node can **cross-reference** user vs self facts on affinity predicates and surface common ground — *"hey, we both like pizza!"*.
+
+**Emotional Scoring + Provenance**: Edges carry `valence` (−1.0…+1.0) and `intensity` (0.0…1.0) so the graph remembers the emotional weight of a fact after the turn ends (a pet's death is `HAS_PET Luna` with `valence=-0.9`). Edges also link to their source episode via `source_episode_id`, enabling provenance queries (`/companion/facts/provenance`) that trace any fact back to where it was inferred.
+
 **Ephemeral Model**: Short-lived states (moods, current activities, temporary preferences) use a TTL column (`expires_at`). The context retrieval query filters `WHERE expires_at > clock_timestamp()` — expired ephemerals are silently dropped. This avoids polluting the companion's long-term memory with transient states while still providing real-time contextual awareness.
 
-**This is the most structurally complex memory pattern in the project**, combining three persistence strategies in a unified retrieval endpoint.
+**This is the most structurally complex memory pattern in the project**, combining three persistence strategies, three memory subjects, emotional metadata, and provenance in a unified retrieval endpoint.
 
 ### Compare and Contrast
 
@@ -320,7 +330,7 @@ An AI companion or personal assistant that maintains a rich, evolving model of i
 
 ### Agent Implementation
 
-The LangGraph agent uses a **3-node tool-calling graph**: `retrieve_companion_context` → `agent` → `tools`. The retrieve node fetches all graph facts, active ephemerals, and episodic search results. The LLM can use:
+The LangGraph agent uses a **4-node graph**: `retrieve_companion_context` → `agent` → `tools`, plus a `extract` node. The retrieve node fetches all graph facts (split into user / self / shared), active ephemerals, and computes common ground between the user and the companion's self-model. The LLM can use:
 
 - `get_companion_context` to refresh the user's memory state
 - `search_episodic_memory` to find semantically similar past conversations
@@ -330,7 +340,11 @@ The LangGraph agent uses a **3-node tool-calling graph**: `retrieve_companion_co
 
 **Tools available**: `get_companion_context`, `search_episodic_memory`, `store_companion_episode`, `store_companion_fact`, `store_companion_ephemeral`
 
-**What changed from the original**: The companion is no longer a passive observer — it writes back episodes, facts, and ephemerals after conversations, creating a true bidirectional memory loop. Multi-turn conversations via the checkpointer preserve dialogue continuity.
+**Dynamic persona from memory**: Instead of a static system prompt, the retrieve node assembles the prompt each turn from the three memory subjects — *"About YOU (your self-model...)", "About your RELATIONSHIP (shared facts...)", "Things you and the user have in common"* — so the companion's personality and behavior are driven by its accumulated self-model state.
+
+**3-scope extraction**: After responding, the `extract` node runs a structured extraction that separates `user_facts`, `self_facts` (what the companion revealed about itself), and `shared_facts` (relationship), each with a canonical predicate (production-aligned UPPER_SNAKE vocabulary), emotional `valence`/`intensity`, and a `source_episode_id`. The episode is created first, so every fact links back to the conversation it was learned from.
+
+**What changed from the original**: The companion is no longer a passive observer nor a one-sided model of the user — it maintains a balanced memory of both itself and the user, records the emotional weight of facts, tracks provenance, and surfaces shared ground as the relationship grows. Multi-turn conversations via the checkpointer preserve dialogue continuity.
 
 ---
 
@@ -377,13 +391,13 @@ The LangGraph agent uses a **3-node tool-calling graph**: `retrieve_companion_co
 
 ### Current State
 
-Every LangGraph agent in this project is a **3-node tool-calling pipeline** with conditional routing:
+Every LangGraph agent in this project is a **3-node tool-calling pipeline** with conditional routing (the Companion adds a fourth extraction node):
 
 ```
 entry node → agent (LLM + tools) → [conditional: tool_calls?] → tools → agent → END
 ```
 
-The entry node retrieves memory context from the API, the agent node invokes the LLM with bound tools, and the tools node (`ToolNode`) executes tool calls. A conditional edge checks for `tool_calls` on the last message — if tools were called, the graph loops back to the agent for follow-up; otherwise it ends.
+The entry node retrieves memory context from the API, the agent node invokes the LLM with bound tools, and the tools node (`ToolNode`) executes tool calls. A conditional edge checks for `tool_calls` on the last message — if tools were called, the graph loops back to the agent for follow-up; otherwise it ends. The Companion graph branches to a final `extract` node that runs structured 3-scope extraction (user/self/shared) with emotional valence and provenance before ending.
 
 **This project uses**:
 - **ToolNode** — tool calling and function execution via `langgraph.prebuilt`
@@ -392,6 +406,7 @@ The entry node retrieves memory context from the API, the agent node invokes the
 - **Checkpointer** — Postgres-backed state persistence via `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`
 - **Bidirectional memory** — all agents can both read from and write to the memory engine
 - **Send API** — the Swarm pattern fans out from a supervisor to parallel worker nodes
+- **Post-response extraction** — the Companion writes back structured, typed memory (including self-model facts) after each turn
 
 **This project does not yet use**:
 - **Subgraphs** — no composed agent hierarchies (the Swarm supervisor uses nodes, not compiled subgraphs)

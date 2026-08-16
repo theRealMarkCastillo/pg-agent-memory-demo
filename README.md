@@ -59,7 +59,7 @@ Each pattern addresses a distinct agent archetype with different memory requirem
 | 3 | **Enterprise Knowledge Agent** | Policy & Audit Memory | halfvec HNSW + tsvector GIN | Reciprocal Rank Fusion (RRF) | Role-gated knowledge retrieval |
 | 4 | **Adaptive Tutor** | Skill Tree Memory | CTE + decay function | Forgetting-curve gap analysis | Spaced repetition modeling |
 | 5 | **Multi-Agent Swarm** | Blackboard Memory | FOR UPDATE SKIP LOCKED | Lock-free task claiming | Distributed coordination |
-| 6 | **AI Companion** | Relational Identity Memory | Graph + TTL + chunk HNSW | Multi-domain context merge | Autobiographical memory |
+| 6 | **AI Companion** | Relational Identity Memory | Graph + TTL + chunk HNSW | Multi-domain context merge | Autobiographical memory (user + self + shared) |
 
 For detailed analysis including compare/contrast with alternative approaches, production considerations, and LangGraph integration patterns, see **[GUIDE.md](GUIDE.md)**.
 
@@ -103,11 +103,17 @@ EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
 LLM_MODEL_NAME=llama3.1
 ```
 
+Optional — LangSmith access for the trace tooling (`tools/`):
+```ini
+LANGSMITH_API_KEY=ls-...       # smith.langchain.com API key
+LANGSMITH_PROJECT=eidolon-prod # Project/session to pull traces from
+```
+
 ---
 
 ## Testing and Evaluation
 
-54 tests across 8 modules validate functional correctness, retrieval quality, and concurrency safety:
+74 tests across 9 modules validate functional correctness, retrieval quality, concurrency safety, and the companion memory pipeline:
 
 ```bash
 make up && make test        # Start engine + run full suite (~45s)
@@ -124,8 +130,11 @@ make ci                     # Build + start + test + cleanup
 | `test_enterprise` | 6 | RBAC enforcement, RRF scoring, FTS matching |
 | `test_tutor` | 6 | Skill completeness, decay monotonicity, gap threshold |
 | `test_swarm` | 7 | SKIP LOCKED concurrency, task lifecycle, no-double-claim |
-| `test_companion` | 6 | Graph facts, TTL expiration, user isolation |
+| `test_companion` | 20 | Graph facts, self-model, shared facts, backstory, TTL, provenance, valence, user isolation |
+| `test_synthetic` | 10 | Synthetic corpus generation, ground-truth matching, LLM extraction (LLM-gated), common-ground detection |
 | `test_agent_evals` | 8 | Cross-pattern isolation, 20-agent parallel swarm, temporal correctness |
+
+For testing the companion memory with real or synthetic data, see the **`tools/` pipeline** below.
 
 ---
 
@@ -150,7 +159,7 @@ make ci                     # Build + start + test + cleanup
 │       ├── enterprise.py       # RRF + RBAC document search
 │       ├── tutor.py            # Skill tree + decayed proficiency query
 │       ├── swarm.py            # Blackboard task lifecycle + SKIP LOCKED
-│       └── companion.py        # Graph facts + ephemerals + episodic chunks
+│       └── companion.py        # Graph facts + self-model + provenance + valence
 ├── demo_agents/
 │   ├── Dockerfile
 │   ├── main.py                 # Seeds data, runs 12 demos (6 patterns + multi-turn + supervisor fan-out + companion lifecycle)
@@ -163,12 +172,97 @@ make ci                     # Build + start + test + cleanup
 │       ├── enterprise_agent.py # 3-node graph: search → agent → tools
 │       ├── tutor_agent.py      # 3-node graph: assess → agent → tools
 │       ├── swarm_agent.py      # supervisor + Send API fan-out → workers → aggregate
-│       └── companion_agent.py  # retrieve → agent → tools + fact-extraction node
+│       └── companion_agent.py  # retrieve → agent → tools + 3-scope fact extraction node
+├── tools/
+│   ├── pull_langsmith_traces.py  # Pull top-level LangSmith traces for a project
+│   ├── pull_conversations.py     # Paginated pull of conversation traces (resumable)
+│   ├── parse_traces.py           # Parse LangGraph / RunnableSequence / MasterGraph traces into turns
+│   ├── replay_traces.py          # Replay parsed conversations through companion extraction → engine
+│   ├── eval_recall.py            # Query /companion/context + probe queries for recall
+│   ├── benchmark_extraction.py   # Score our extractor vs production ground-truth facts
+│   ├── generate_synthetic.py     # Generate synthetic conversations + known ground truth
+│   └── cleanup_replay.py         # Forget replay/test users from the memory engine
 └── tests/
     ├── conftest.py             # Shared fixtures + HTTP helpers
     ├── pytest.ini              # asyncio mode configuration
-    └── test_*.py               # 54 tests across 8 modules
+    └── test_*.py               # 74 tests across 9 modules
 ```
+
+---
+
+## Companion Memory Design
+
+The Companion pattern (Pattern 6) is the most feature-rich: it models **three subjects** in one graph — the user, the AI companion itself, and their shared relationship — so the memory is balanced and grows together.
+
+### Three-Subject Memory (`subject` column)
+
+Every graph node and edge carries a `subject`: `user`, `self`, or `shared`.
+
+| Subject | What it stores | Example |
+|---------|---------------|---------|
+| `user` | Durable facts the user revealed | `user LIVES_IN Seattle` |
+| `self` | The companion's model of **itself** — extracted from its own outputs | `Vesper VALUES honesty` |
+| `shared` | Relationship facts binding both — "growing together" | `Vesper TRUSTS user`, `we SHARE_RITUAL morning coffee` |
+
+`/companion/context` returns all three groups (`graph_facts`, `self_facts`, `shared_facts`), each relevance-ranked. The agent's system prompt is built **dynamically** from the self-model + shared + user facts each turn, so responses depend on memory state rather than a static personality script:
+
+```
+About YOU (your self-model, backstory and how you've grown): ...
+About your RELATIONSHIP (shared facts, growing together): ...
+Things you and the user have in common: pizza, hiking
+```
+
+### Backstory Seeding
+
+`POST /companion/backstory` pre-populates the self-model per user (companion name, traits, history) plus initial shared facts. It is idempotent — re-seeding upserts rather than duplicating. The demo seeds Iris's backstory at startup.
+
+### Common-Interest Detection
+
+The retrieve node cross-references `user_facts` against `self_facts` on affinity predicates (`LOVES`, `ENJOYS`, `PLAYS`, `INTERESTED_IN`, ...) with normalized entity matching, and surfaces shared interests in the prompt — so the companion can naturally say *"hey, we both like pizza!"*.
+
+### Emotional Scoring (valence + intensity)
+
+Edges carry `valence` (−1.0 sad/loss … +1.0 joyful) and `intensity` (0.0…1.0), emitted by the extractor and stored. The graph *remembers* emotional weight after the turn ends — e.g. a pet's death is stored as `HAS_PET Luna` with `valence=-0.9`, so future retrievals know to be gentle. Values are clamped server-side.
+
+### Fact Provenance
+
+Edges link to the episode they were inferred from via `source_episode_id`. `GET /companion/facts/provenance?name=...` traces any fact back to its exact source conversation, answering *"where did we learn that?"*. Full-text/semantic search finds *conversations*; provenance finds *which fact came from which message*.
+
+### Entity & Relation Normalization
+
+The engine canonicalizes entities (accent/case/punctuation-insensitive keys + alias map: `me`/`I` → `user`) and relation predicates (UPPER_SNAKE vocabulary aligned with production). Facts fold into existing nodes/edges instead of fragmenting — the same entity under different spellings or the same relation under different phrasings becomes a single canonical row.
+
+---
+
+## Memory Testing Pipeline (`tools/`)
+
+The `tools/` directory provides a full pipeline for testing the companion memory against **real LangSmith traces** or **synthetic data with known ground truth**:
+
+| Tool | Purpose |
+|------|---------|
+| `pull_langsmith_traces.py` | Pull top-level LangSmith traces for a project |
+| `pull_conversations.py` | Paginated, resumable pull of conversation traces |
+| `parse_traces.py` | Parse LangGraph / RunnableSequence / MasterGraph traces into `(user, assistant)` turns |
+| `replay_traces.py` | Replay parsed conversations through the companion extraction → memory engine |
+| `eval_recall.py` | Query `/companion/context` + probe queries to measure recall |
+| `benchmark_extraction.py` | Score our extractor against production ground-truth facts (precision/recall/F1) |
+| `generate_synthetic.py` | Generate synthetic conversations with **known** ground-truth facts (user/self/shared) |
+| `cleanup_replay.py` | Forget replay/test users from the engine |
+
+**Real-trace workflow:**
+```bash
+python tools/pull_conversations.py --project eidolon-prod --out /tmp/conv
+python tools/benchmark_extraction.py --traces-dir /tmp/conv --sample 30
+python tools/cleanup_replay.py --all-replay
+```
+
+**Synthetic workflow (deterministic, no API):**
+```bash
+python tools/generate_synthetic.py --count 50 --out traces_synthetic
+python tools/benchmark_extraction.py --traces-dir traces_synthetic --all
+```
+
+Synthetic data is the primary regression corpus (controlled ground truth, CI-safe); real traces are a periodic reality-check for extractor drift.
 
 ---
 
@@ -187,7 +281,7 @@ The LLM decides when to call a tool (search memory, write back a result, execute
 Agents both read from and write to the memory engine. For example:
 - **Task Agent**: recalls past trajectories, executes a task, then stores the new trajectory with a success score
 - **Swarm Agent**: claims a task from the blackboard, processes it, and marks it complete
-- **Companion Agent**: retrieves user context, responds, and stores new facts/episodes/ephemerals
+- **Companion Agent**: retrieves user context, responds, then extracts and stores **user, self, and shared facts** with emotional valence and provenance
 
 ### Checkpointer (State Persistence)
 Every agent graph is compiled with a `PostgresSaver` checkpointer backed by a connection pool. Conversation state is persisted to PostgreSQL across invocations via `thread_id` configs. This enables:
@@ -216,6 +310,12 @@ Every agent graph is compiled with a `PostgresSaver` checkpointer backed by a co
 | **Conditional routing** | Enterprise, Tutor | Guard against empty retrievals; route to fallback nodes | Future |
 | **Sub-agents + Send API** | Swarm | Supervisor fans out to parallel worker subgraphs via Send API | Done |
 | **Context window management** | Companion | Rank facts by salience + query relevance; prune by limit | Done |
+| **AI self-model** | Companion | Companion builds a model of itself (subject=`self`), dynamic persona from memory state | Done |
+| **Shared relationship memory** | Companion | `subject=shared` facts capture the growing bond; common-interest surfacing | Done |
+| **Emotional scoring** | Companion | `valence`/`intensity` on facts; the graph remembers emotional weight | Done |
+| **Fact provenance** | Companion | Edges link to source episodes; trace any fact to where it was learned | Done |
+| **Entity/relation normalization** | Companion | Canonical entities + UPPER_SNAKE predicates fold instead of fragmenting | Done |
+| **Synthetic + trace evaluation** | Companion | `tools/` pipeline: replay real traces or synthetic ground truth; precision/recall | Done |
 
 See **[GUIDE.md](GUIDE.md)** for detailed architectural analysis of each pattern and production guidance.
 
