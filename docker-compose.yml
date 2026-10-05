@@ -14,7 +14,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_password}
       POSTGRES_DB: ${POSTGRES_DB:-agent_memory_db}
     ports:
-      - "${POSTGRES_PORT:-5434}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5434}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -30,6 +30,10 @@ services:
     build:
       context: ./memory_engine
     container_name: memory-engine-api
+    read_only: true
+    tmpfs: ["/tmp:rw,nosuid,size=128m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -39,8 +43,10 @@ services:
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
       EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME}
+      MEMORY_ADMIN_TOKEN: ${MEMORY_ADMIN_TOKEN:?Generate a random admin token}
+      MEMORY_AUTH_TOKENS: ${MEMORY_AUTH_TOKENS:?Configure scoped client tokens}
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,8 +57,13 @@ services:
     build:
       context: ./demo_agents
     container_name: demo-agent-runner
+    read_only: true
+    tmpfs: ["/tmp:rw,nosuid,size=128m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
       MEMORY_ENGINE_URL: http://memory-engine:8000
+      MEMORY_API_TOKEN: ${MEMORY_API_TOKEN:?Configure the scoped demo token}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL_NAME: ${LLM_MODEL_NAME}
@@ -62,7 +73,21 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_password}
       POSTGRES_DB: ${POSTGRES_DB:-agent_memory_db}
       WORKSPACE_DIR: /tmp/agent-workspace
+      HTTP_ALLOWED_HOSTS: ${HTTP_ALLOWED_HOSTS:-}
     depends_on:
       - memory-engine
     networks:
       - agent-memory-net
+
+  demo-seed:
+    build: ./demo_agents
+    profiles: [setup]
+    command: [python, main.py, --seed-only]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      MEMORY_ENGINE_URL: http://memory-engine:8000
+      MEMORY_API_TOKEN: ${MEMORY_ADMIN_TOKEN:?Generate a random admin token}
+    networks: [agent-memory-net]

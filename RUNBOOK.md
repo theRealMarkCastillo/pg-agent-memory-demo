@@ -1,3 +1,5 @@
+> Current authentication, migration, deletion, execution, and verification instructions: [REMEDIATION.md](REMEDIATION.md). API requests require a scoped bearer token; health checks remain public on loopback.
+
 # Runbook
 
 ## Prerequisites
@@ -16,7 +18,10 @@ Edit `.env` and provide your API credentials. The stack works with any OpenAI-co
 ## Launch
 
 ```bash
-docker compose up --build
+python tools/configure_auth.py
+make build up
+make seed
+make demo
 ```
 
 On first run Docker builds both service images. Subsequent runs are faster — use `docker compose up` without `--build` unless code changes.
@@ -32,7 +37,7 @@ Open http://localhost:8001/docs for the Swagger UI.
 
 ## Run Demos
 
-The demo runner executes automatically on container start. It runs **12 demos**: the 6 base patterns plus 6 multi-turn and real execution demos (shell commands, HTTP requests, file operations). View output:
+Run `make demo` after `make seed`. The Compose runner leaves shell execution disabled; configure the local Docker sandbox explicitly for shell demos. See [REMEDIATION.md](REMEDIATION.md) for authentication, migrations, and test environments. It runs **12 demos**: the 6 base patterns plus 6 multi-turn and real execution demos (shell commands, HTTP requests, file operations). View output:
 
 ```bash
 docker logs -f demo-agent-runner
@@ -64,8 +69,8 @@ docker compose restart demo-agents
 ## Tear Down
 
 ```bash
-docker compose down -v   # removes containers, network, and volume
-docker compose down      # keeps the volume (data persists)
+make down    # preserves data
+make clean   # explicitly removes the database volume
 ```
 
 ## Common Issues

@@ -1,12 +1,17 @@
 import os
 from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END, add_messages
-from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import DEVELOPER_TOOLS
 from .checkpointer import get_checkpointer
+from .runtime import (
+    auth_headers,
+    refresh_messages,
+    prompt_messages,
+    ScopedToolNode,
+    ScopedGraph,
+)
 
 
 class AgentState(TypedDict):
@@ -30,7 +35,7 @@ llm_with_tools = llm.bind_tools(DEVELOPER_TOOLS)
 async def search_code_symbols(state: AgentState):
     import httpx
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
         res = await client.post(
             f"{os.getenv('MEMORY_ENGINE_URL', 'http://memory-engine:8000')}/developer/symbols/search",
             json={
@@ -39,6 +44,7 @@ async def search_code_symbols(state: AgentState):
                 "query": state["query"],
             },
         )
+        res.raise_for_status()
         data = res.json()
 
     symbols_str = "\n".join(
@@ -55,19 +61,9 @@ async def search_code_symbols(state: AgentState):
         f"Relevant Code Symbols:\n{symbols_str}"
     )
 
-    existing = state.get("messages", [])
-    if existing:
-        messages = list(existing)
-        if getattr(messages[0], "type", "") == "system":
-            messages[0] = SystemMessage(content=system_content)
-        else:
-            messages.insert(0, SystemMessage(content=system_content))
-        messages.append(HumanMessage(content=state["query"]))
-    else:
-        messages = [
-            SystemMessage(content=system_content),
-            HumanMessage(content=state["query"]),
-        ]
+    messages = refresh_messages(
+        system_content, state.get("messages", []), state["query"]
+    )
 
     return {
         "retrieved_symbols": symbols_str,
@@ -76,7 +72,7 @@ async def search_code_symbols(state: AgentState):
 
 
 async def agent_node(state: AgentState):
-    response = await llm_with_tools.ainvoke(state["messages"])
+    response = await llm_with_tools.ainvoke(prompt_messages(state["messages"]))
     return {"messages": [response]}
 
 
@@ -91,14 +87,18 @@ def build_developer_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder = StateGraph(AgentState)
     builder.add_node("search", search_code_symbols)
     builder.add_node("agent", agent_node)
-    builder.add_node("tools", ToolNode(DEVELOPER_TOOLS))
+    builder.add_node("tools", ScopedToolNode(DEVELOPER_TOOLS))
 
     builder.set_entry_point("search")
     builder.add_edge("search", "agent")
-    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    builder.add_conditional_edges(
+        "agent", should_continue, {"tools": "tools", END: END}
+    )
     builder.add_edge("tools", "agent")
 
-    return builder.compile(checkpointer=checkpointer)
+    return ScopedGraph(
+        builder.compile(checkpointer=checkpointer), "developer", checkpointer
+    )
 
 
 async def build_developer_graph_with_checkpointer():

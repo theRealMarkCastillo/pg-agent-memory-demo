@@ -65,8 +65,8 @@ def _turns_from_messages(messages: list) -> list[Turn]:
             elif turns:
                 # orphan assistant message - attach to previous turn context
                 turns[-1] = Turn(turns[-1].user, f"{turns[-1].assistant}\n{assistant}")
-    if user_buf and turns:
-        turns[-1] = Turn(f"{turns[-1].user}\n{'\n'.join(user_buf)}", turns[-1].assistant)
+    if user_buf:
+        turns.append(Turn("\n".join(user_buf), ""))
     return turns
 
 
@@ -84,8 +84,8 @@ def _turns_from_conversation_block(conv: str) -> list[Turn]:
             turns.append(
                 Turn("\n".join(user_parts).strip(), "\n".join(assistant_parts).strip())
             )
-        elif user_parts and turns:
-            turns[-1] = Turn(turns[-1].user, "\n".join(user_parts).strip())
+        elif user_parts:
+            turns.append(Turn("\n".join(user_parts).strip(), ""))
         user_parts = []
         assistant_parts = []
 
@@ -135,6 +135,9 @@ def parse_trace_file(path: str | Path) -> tuple[list[Turn], dict]:
         "trace_id": data.get("trace_id"),
         "run_names": sorted({r.get("name", "") for r in runs}),
         "production_facts": [],
+        "started_at": min(
+            (r["start_time"] for r in runs if r.get("start_time")), default=None
+        ),
     }
 
     turns: list[Turn] = []
@@ -157,9 +160,11 @@ def parse_trace_file(path: str | Path) -> tuple[list[Turn], dict]:
             break
         # LangGraph traces: full conversation lives in the top-level run
         if name == "LangGraph" and not run.get("parent_run_id"):
-            messages = (run.get("outputs") or {}).get("messages") or (
-                run.get("inputs") or {}
-            ).get("messages") or []
+            messages = (
+                (run.get("outputs") or {}).get("messages")
+                or (run.get("inputs") or {}).get("messages")
+                or []
+            )
             turns = _turns_from_messages(messages)
             if turns:
                 meta["shape"] = "langgraph"
@@ -227,6 +232,7 @@ def parse_trace_dir(directory: str | Path) -> list[tuple[list[Turn], dict]]:
         turns, meta = parse_trace_file(path)
         if turns:
             results.append((turns, meta))
+    results.sort(key=lambda item: (item[1].get("started_at") or "", item[1]["file"]))
     return results
 
 

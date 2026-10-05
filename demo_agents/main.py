@@ -1,16 +1,16 @@
 import asyncio
 import os
 import httpx
-from agents.developer_agent import build_developer_graph_with_checkpointer
-from agents.task_agent import build_task_graph_with_checkpointer
-from agents.enterprise_agent import build_enterprise_graph_with_checkpointer
-from agents.tutor_agent import build_tutor_graph_with_checkpointer
-from agents.swarm_agent import build_swarm_graph_with_checkpointer
-from agents.companion_agent import build_companion_graph_with_checkpointer
+from agents.runtime import auth_headers
 
 MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 SEED_RETRIES = 30
 SEED_RETRY_DELAY = 2
+
+
+async def raise_http_error(response):
+    await response.aread()
+    response.raise_for_status()
 
 
 async def seed_data(client: httpx.AsyncClient):
@@ -52,7 +52,7 @@ async def seed_data(client: httpx.AsyncClient):
     await client.post(
         f"{MEMORY_ENGINE_URL}/task/trajectories",
         json={
-            "agent_id": "task-bot-1",
+            "agent_id": "task-bot-2",
             "goal_description": "Scrape product prices from competitor websites and compile a CSV report",
             "action_sequence": [
                 {"action": "fetch_url", "url": "https://competitor.com/products"},
@@ -167,16 +167,32 @@ async def seed_data(client: httpx.AsyncClient):
             "user_id": "usr_anthony",
             "name": "Iris",
             "backstory": [
-                {"name": "Iris", "entity_type": "self",
-                 "relationship_to": "a quiet coastal town", "relationship_type": "lives_in"},
-                {"name": "Iris", "entity_type": "self",
-                 "relationship_to": "long conversations", "relationship_type": "values"},
-                {"name": "Iris", "entity_type": "self",
-                 "relationship_to": "poetry", "relationship_type": "writes"},
+                {
+                    "name": "Iris",
+                    "entity_type": "self",
+                    "relationship_to": "a quiet coastal town",
+                    "relationship_type": "lives_in",
+                },
+                {
+                    "name": "Iris",
+                    "entity_type": "self",
+                    "relationship_to": "long conversations",
+                    "relationship_type": "values",
+                },
+                {
+                    "name": "Iris",
+                    "entity_type": "self",
+                    "relationship_to": "poetry",
+                    "relationship_type": "writes",
+                },
             ],
             "shared": [
-                {"name": "Iris", "entity_type": "self",
-                 "relationship_to": "usr_anthony", "relationship_type": "trusts"},
+                {
+                    "name": "Iris",
+                    "entity_type": "self",
+                    "relationship_to": "usr_anthony",
+                    "relationship_type": "trusts",
+                },
             ],
         },
     )
@@ -197,13 +213,17 @@ def _last_assistant_response(result: dict) -> str:
 
 
 async def run_demos():
+    from agents.developer_agent import build_developer_graph_with_checkpointer
+    from agents.task_agent import build_task_graph_with_checkpointer
+    from agents.enterprise_agent import build_enterprise_graph_with_checkpointer
+    from agents.tutor_agent import build_tutor_graph_with_checkpointer
+    from agents.swarm_agent import build_swarm_graph_with_checkpointer
+    from agents.companion_agent import build_companion_graph_with_checkpointer
+
     print("=" * 60)
     print("Agent Memory Patterns Demonstration")
     print("  (Tool Calling + Write-Back + Checkpointer)")
     print("=" * 60)
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        await seed_data(client)
 
     print("\n[Demo 1/6] Developer Agent — Code Symbol Search + Write-Back")
     print("-" * 40)
@@ -341,15 +361,23 @@ async def run_demos():
     print(f"Response:\n{_last_assistant_response(result3)}")
     print(f"Extracted Memories:\n{result3.get('extracted_facts', 'N/A')}")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        headers=auth_headers(),
+        event_hooks={"response": [raise_http_error]},
+    ) as client:
         ctx = await client.get(
             f"{MEMORY_ENGINE_URL}/companion/context",
             params={"user_id": "usr_anthony"},
         )
         facts = ctx.json().get("graph_facts", [])
-    print(f"Memory State After Conflict Resolution:")
+    print("Memory State After Conflict Resolution:")
     for f in facts:
-        rel = f" {f['relationship_type']} {f['related_to']}" if f.get("related_to") else ""
+        rel = (
+            f" {f['relationship_type']} {f['related_to']}"
+            if f.get("related_to")
+            else ""
+        )
         print(f"  - {f['name']} ({f['entity_type']}){rel} [salience={f['salience']}]")
 
     print("\n[Demo 6d] Companion — Right to Forget")
@@ -364,9 +392,22 @@ async def run_demos():
     print(f"Response:\n{_last_assistant_response(result4)}")
 
     print("\n" + "=" * 60)
-    print("All 12 demos complete! (6 patterns + multi-turn + supervisor fan-out + companion lifecycle)")
+    print(
+        "All 12 demos complete! (6 patterns + multi-turn + supervisor fan-out + companion lifecycle)"
+    )
     print("=" * 60)
 
 
+async def seed_demo():
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        headers=auth_headers(),
+        event_hooks={"response": [raise_http_error]},
+    ) as client:
+        await seed_data(client)
+
+
 if __name__ == "__main__":
-    asyncio.run(run_demos())
+    import sys
+
+    asyncio.run(seed_demo() if "--seed-only" in sys.argv else run_demos())

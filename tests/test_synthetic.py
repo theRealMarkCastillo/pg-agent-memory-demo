@@ -9,6 +9,7 @@ requiring an LLM, so it runs deterministically in CI:
 An optional LLM-backed extraction test is included but skipped unless
 LLM_BASE_URL / LLM_API_KEY are set (OpenRouter/OpenAI required).
 """
+
 import asyncio
 import json
 import os
@@ -21,12 +22,11 @@ import pytest
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
-from generate_synthetic import FACT_LIBRARY, build_trace, build_facts, build_conversation  # noqa: E402
+from generate_synthetic import FACT_LIBRARY, build_trace  # noqa: E402
 from parse_traces import parse_trace_file  # noqa: E402
 from benchmark_extraction import match_fact, _real_entity_ours  # noqa: E402
 from replay_traces import PREDICATE_VOCAB  # noqa: E402
 
-import random  # noqa: E402
 
 SYNTH_DIR = Path(__file__).resolve().parent / "synth_fixtures"
 
@@ -79,27 +79,53 @@ def test_every_fact_reveals_one_turn(synth_traces):
 def test_matcher_recognizes_exact_ground_truth():
     """match_fact should return True when our fact equals a ground-truth fact."""
     cases = [
-        ({"name": "user", "relationship_type": "LIVES_IN", "relationship_to": "Seattle"},
-         {"predicate": "LIVES_IN", "object_value": "Seattle"}),
-        ({"name": "user", "relationship_type": "MARRIED_TO", "relationship_to": "Sarah"},
-         {"predicate": "MARRIED_TO", "object_value": "Sarah"}),
-        ({"name": "user", "relationship_type": "HAS_PET", "relationship_to": "Luna"},
-         {"predicate": "HAS_PET", "object_value": "Luna"}),
-        ({"name": "user", "relationship_type": "WANTS_TO", "relationship_to": "learn Japanese"},
-         {"predicate": "WANTS_TO", "object_value": "learn Japanese"}),
+        (
+            {
+                "name": "user",
+                "relationship_type": "LIVES_IN",
+                "relationship_to": "Seattle",
+            },
+            {"predicate": "LIVES_IN", "object_value": "Seattle"},
+        ),
+        (
+            {
+                "name": "user",
+                "relationship_type": "MARRIED_TO",
+                "relationship_to": "Sarah",
+            },
+            {"predicate": "MARRIED_TO", "object_value": "Sarah"},
+        ),
+        (
+            {"name": "user", "relationship_type": "HAS_PET", "relationship_to": "Luna"},
+            {"predicate": "HAS_PET", "object_value": "Luna"},
+        ),
+        (
+            {
+                "name": "user",
+                "relationship_type": "WANTS_TO",
+                "relationship_to": "learn Japanese",
+            },
+            {"predicate": "WANTS_TO", "object_value": "learn Japanese"},
+        ),
     ]
     for our, prod in cases:
         assert match_fact(our, prod), f"matcher rejected {our} vs {prod}"
 
 
 def test_matcher_rejects_wrong_entity():
-    our = {"name": "user", "relationship_type": "LIVES_IN", "relationship_to": "Chicago"}
+    our = {
+        "name": "user",
+        "relationship_type": "LIVES_IN",
+        "relationship_to": "Chicago",
+    }
     prod = {"predicate": "LIVES_IN", "object_value": "Seattle"}
     assert not match_fact(our, prod)
 
 
 def test_entity_resolution_ours():
-    assert _real_entity_ours({"name": "user", "relationship_to": "Seattle"}) == "seattle"
+    assert (
+        _real_entity_ours({"name": "user", "relationship_to": "Seattle"}) == "seattle"
+    )
     assert _real_entity_ours({"name": "Sarah", "relationship_to": None}) == "sarah"
 
 
@@ -112,7 +138,11 @@ def test_predicate_vocab_aligned_with_fact_library():
 
 
 @pytest.mark.skipif(
-    not (os.getenv("LLM_BASE_URL") and os.getenv("LLM_API_KEY")),
+    not (
+        os.getenv("LIVE_LLM_EVAL") == "1"
+        and os.getenv("LLM_BASE_URL")
+        and os.getenv("LLM_API_KEY")
+    ),
     reason="LLM credentials not configured",
 )
 @pytest.mark.asyncio
@@ -128,8 +158,19 @@ async def test_llm_extraction_recovers_synthetic_facts(synth_traces):
     p = sorted(synth_traces.glob("*.json"))[0]
     turns, meta = parse_trace_file(str(p))
     client = get_openai_client(env)
-    data = await asyncio.wait_for(extract_turn(client, env["LLM_MODEL_NAME"], turns), timeout=100)
-    our_facts = [f for f in data.get("new_facts", []) if f.get("name")]
+    data = await asyncio.wait_for(
+        extract_turn(client, env["LLM_MODEL_NAME"], turns), timeout=100
+    )
+    our_facts = [
+        dict(f, subject=subject)
+        for subject, key in (
+            ("user", "user_facts"),
+            ("self", "self_facts"),
+            ("shared", "shared_facts"),
+        )
+        for f in data.get(key, [])
+        if f.get("name")
+    ]
     prod = meta["production_facts"]
     tp = sum(1 for of in our_facts if any(match_fact(of, pf) for pf in prod))
     assert tp >= 1, f"LLM extraction recovered no ground-truth facts: {our_facts}"
@@ -140,6 +181,7 @@ async def test_llm_extraction_recovers_synthetic_facts(synth_traces):
 
 def test_common_ground_matches_shared_affinity():
     """A matching affinity predicate+entity between user and self facts is found."""
+
     def norm(name):
         return "".join(c for c in (name or "").lower() if c.isalnum())
 
@@ -151,10 +193,13 @@ def test_common_ground_matches_shared_affinity():
             rel = (f.get("relationship_type") or "").strip().lower()
             if rel in affinity and f.get("related_to"):
                 self_map[norm(f["related_to"])] = f["related_to"]
-        return [f["related_to"] for f in user_facts
-                if (f.get("relationship_type") or "").strip().lower() in affinity
-                and f.get("related_to")
-                and norm(f["related_to"]) in self_map]
+        return [
+            f["related_to"]
+            for f in user_facts
+            if (f.get("relationship_type") or "").strip().lower() in affinity
+            and f.get("related_to")
+            and norm(f["related_to"]) in self_map
+        ]
 
     user_facts = [
         {"relationship_type": "likes", "related_to": "pizza"},
@@ -181,18 +226,27 @@ def test_common_ground_requires_same_entity_and_affinity():
             rel = (f.get("relationship_type") or "").strip().lower()
             if rel in affinity and f.get("related_to"):
                 self_map[norm(f["related_to"])] = f["related_to"]
-        return [f["related_to"] for f in user_facts
-                if (f.get("relationship_type") or "").strip().lower() in affinity
-                and f.get("related_to")
-                and norm(f["related_to"]) in self_map]
+        return [
+            f["related_to"]
+            for f in user_facts
+            if (f.get("relationship_type") or "").strip().lower() in affinity
+            and f.get("related_to")
+            and norm(f["related_to"]) in self_map
+        ]
 
     # same entity, different predicate family (lives_in is not affinity)
-    assert find_common(
-        [{"relationship_type": "lives_in", "related_to": "Paris"}],
-        [{"relationship_type": "likes", "related_to": "Paris"}],
-    ) == []
+    assert (
+        find_common(
+            [{"relationship_type": "lives_in", "related_to": "Paris"}],
+            [{"relationship_type": "likes", "related_to": "Paris"}],
+        )
+        == []
+    )
     # different entity, same predicate
-    assert find_common(
-        [{"relationship_type": "likes", "related_to": "pizza"}],
-        [{"relationship_type": "likes", "related_to": "sushi"}],
-    ) == []
+    assert (
+        find_common(
+            [{"relationship_type": "likes", "related_to": "pizza"}],
+            [{"relationship_type": "likes", "related_to": "sushi"}],
+        )
+        == []
+    )

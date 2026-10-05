@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Request, HTTPException, Query
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 import os
 import json
-import re
 import unicodedata
+import hashlib
+from auth import connection
 from embedding import get_embedding_client
 
 router = APIRouter()
@@ -15,7 +16,7 @@ def normalize_name(name: str) -> str:
     text = unicodedata.normalize("NFKD", name)
     text = "".join(c for c in text if not unicodedata.combining(c))
     text = text.lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = " ".join("".join(c if c.isalnum() else " " for c in text).split())
     return text.strip()
 
 
@@ -28,6 +29,8 @@ _ALIASES = {
 def resolve_entity(name: str) -> str:
     """Return a canonical display name for a resolved entity."""
     key = normalize_name(name)
+    if not key:
+        raise HTTPException(422, "Empty canonical entity name")
     for canonical, aliases in _ALIASES.items():
         if key in aliases:
             return canonical
@@ -54,7 +57,6 @@ _RELATION_SYNONYMS = {
     "is a": "works_as",
     "is author": "works_as",
     "is a writer": "works_as",
-    "writes": "works_as",
     "works at": "works_at",
     "employed at": "works_at",
     # relationships
@@ -133,7 +135,8 @@ def normalize_relation(rel: str | None) -> str | None:
 
 class EpisodeCreate(BaseModel):
     user_id: str
-    content: str
+    content: str = Field(min_length=1, max_length=100000)
+    ingestion_id: Optional[str] = None
 
 
 class GraphFact(BaseModel):
@@ -143,9 +146,18 @@ class GraphFact(BaseModel):
     relationship_to: Optional[str] = None
     relationship_type: Optional[str] = None
     subject: str = "user"  # 'user' | 'self' | 'shared'
-    valence: float = 0.0     # -1.0 .. +1.0
-    intensity: float = 0.5   # 0.0 .. 1.0
+    valence: float = 0.0  # -1.0 .. +1.0
+    intensity: float = 0.5  # 0.0 .. 1.0
     source_episode_id: Optional[str] = None  # provenance
+
+    @field_validator("name", "relationship_to")
+    @classmethod
+    def meaningful_name(cls, value):
+        if value is not None and (not normalize_name(value) or len(value) > 100):
+            raise ValueError(
+                "Entity names must contain letters or numbers and fit in 100 characters"
+            )
+        return value
 
 
 class BackstoryFact(BaseModel):
@@ -160,7 +172,7 @@ class BackstoryFact(BaseModel):
 class EphemeralCreate(BaseModel):
     user_id: str
     description: str
-    ttl_seconds: int = 3600
+    ttl_seconds: int = Field(default=3600, ge=1, le=2592000)
 
 
 class FactTerminate(BaseModel):
@@ -173,48 +185,67 @@ class FactTerminate(BaseModel):
 
 @router.post("/episodes")
 async def create_episode(ep: EpisodeCreate, request: Request):
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO companion_episodes (user_id, content) VALUES ($1, $2) RETURNING episode_id",
+    ingestion_id = ep.ingestion_id or hashlib.sha256(ep.content.encode()).hexdigest()
+    async with connection(request) as conn:
+        existing = await conn.fetchrow(
+            "SELECT episode_id,content FROM companion_episodes WHERE user_id=$1 AND ingestion_id=$2",
             ep.user_id,
-            ep.content,
+            ingestion_id,
         )
-        episode_id = row["episode_id"]
-
+        if existing:
+            if existing["content"] != ep.content:
+                raise HTTPException(
+                    409, "Ingestion ID already belongs to different content"
+                )
+            count = await conn.fetchval(
+                "SELECT count(*) FROM companion_chunks WHERE episode_id=$1",
+                existing["episode_id"],
+            )
+            return {"episode_id": str(existing["episode_id"]), "chunks_stored": count}
         chunks = _chunk_text(ep.content, chunk_size=500)
-        for chunk in chunks:
-            emb_resp = await get_embedding_client().embeddings.create(
-                input=chunk, model=os.getenv("EMBEDDING_MODEL_NAME")
-            )
-            embedding = emb_resp.data[0].embedding
-            await conn.execute(
-                """
-                INSERT INTO companion_chunks (episode_id, user_id, content, embedding)
-                VALUES ($1, $2, $3, $4::halfvec)
-                """,
-                episode_id,
+        # Complete external work before publishing any part of the episode.
+        resp = await get_embedding_client().embeddings.create(
+            input=chunks, model=os.getenv("EMBEDDING_MODEL_NAME")
+        )
+        embeddings = sorted(resp.data, key=lambda item: item.index)
+        if len(embeddings) != len(chunks):
+            raise HTTPException(502, "Incomplete embedding response")
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "INSERT INTO companion_episodes(user_id,content,ingestion_id) VALUES($1,$2,$3) RETURNING episode_id",
                 ep.user_id,
-                chunk,
-                json.dumps(embedding),
+                ep.content,
+                ingestion_id,
             )
-
+            episode_id = row["episode_id"]
+            for chunk, embedding in zip(chunks, embeddings):
+                await conn.execute(
+                    "INSERT INTO companion_chunks(episode_id,user_id,content,embedding) VALUES($1,$2,$3,$4::halfvec)",
+                    episode_id,
+                    ep.user_id,
+                    chunk,
+                    json.dumps(embedding.embedding),
+                )
     return {"episode_id": str(episode_id), "chunks_stored": len(chunks)}
 
 
 @router.post("/facts")
 async def add_graph_fact(fact: GraphFact, request: Request):
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
+    async with connection(request) as conn:
         await _store_fact_conn(conn, fact)
 
     return {"status": "stored"}
 
 
-async def _upsert_node(conn, user_id: str, name: str, entity_type: str, subject: str = "user",
-                       existing_name: str | None = None, bump_salience: bool = False) -> dict | None:
+async def _upsert_node(
+    conn,
+    user_id: str,
+    name: str,
+    entity_type: str,
+    subject: str = "user",
+    existing_name: str | None = None,
+    bump_salience: bool = False,
+) -> dict | None:
     """Insert a node, or merge into an existing node with the same normalized name."""
     key = normalize_name(name)
 
@@ -235,7 +266,7 @@ async def _upsert_node(conn, user_id: str, name: str, entity_type: str, subject:
     if existing:
         if bump_salience:
             await conn.execute(
-                "UPDATE companion_graph_nodes SET salience = salience + 1 WHERE node_id = $1",
+                "UPDATE companion_graph_nodes SET salience = salience + 1, is_subject=true WHERE node_id = $1",
                 existing["node_id"],
             )
         return {
@@ -245,10 +276,11 @@ async def _upsert_node(conn, user_id: str, name: str, entity_type: str, subject:
             "salience": existing["salience"],
         }
 
+    vector = await _embed(name)
     row = await conn.fetchrow(
         """
-        INSERT INTO companion_graph_nodes (user_id, name, entity_type, salience, normalize_name_key, subject)
-        VALUES ($1, $2, $3, 1.0, $4, $5)
+        INSERT INTO companion_graph_nodes (user_id, name, entity_type, salience, normalize_name_key, subject, embedding, is_subject)
+        VALUES ($1, $2, $3, 1.0, $4, $5, $6::halfvec, $7)
         ON CONFLICT (user_id, normalize_name_key, subject)
         DO UPDATE SET entity_type = EXCLUDED.entity_type,
                       salience = companion_graph_nodes.salience + 1
@@ -259,6 +291,8 @@ async def _upsert_node(conn, user_id: str, name: str, entity_type: str, subject:
         entity_type,
         key,
         subject,
+        vector,
+        bump_salience,
     )
     if row:
         return dict(row)
@@ -281,7 +315,7 @@ async def _upsert_node(conn, user_id: str, name: str, entity_type: str, subject:
     if existing:
         if bump_salience:
             await conn.execute(
-                "UPDATE companion_graph_nodes SET salience = salience + 1 WHERE node_id = $1",
+                "UPDATE companion_graph_nodes SET salience = salience + 1, is_subject=true WHERE node_id = $1",
                 existing["node_id"],
             )
         return {
@@ -302,14 +336,14 @@ def _normalize_subject(subject: str) -> str:
 
 @router.post("/facts/terminate")
 async def terminate_relationship(req: FactTerminate, request: Request):
-    pool = request.app.state.pool
-
     name = resolve_entity(req.name)
-    relationship_to = resolve_entity(req.relationship_to) if req.relationship_to else None
+    relationship_to = (
+        resolve_entity(req.relationship_to) if req.relationship_to else None
+    )
     relationship_type = normalize_relation(req.relationship_type)
     subject = _normalize_subject(req.subject)
 
-    async with pool.acquire() as conn:
+    async with connection(request) as conn:
         result = await conn.fetchval(
             """
             UPDATE companion_graph_edges e
@@ -341,34 +375,57 @@ async def terminate_relationship(req: FactTerminate, request: Request):
 
 @router.delete("/memory/{user_id}")
 async def forget_user_memory(user_id: str, request: Request):
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
+    async with connection(request) as conn:
         async with conn.transaction():
+            if await conn.fetchval("SELECT to_regclass('checkpoints')"):
+                legacy = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE thread_id !~ '^[a-z]+:[0-9a-f]{64}:')"
+                )
+                if legacy:
+                    raise HTTPException(
+                        409,
+                        "Unowned legacy checkpoints remain; an administrator must migrate or explicitly purge them before forgetting can be guaranteed",
+                    )
             await conn.execute(
-                "DELETE FROM companion_chunks WHERE user_id = $1", user_id
+                "INSERT INTO companion_memory_state(user_id,enabled) VALUES($1,false) ON CONFLICT(user_id) DO UPDATE SET enabled=false,generation=companion_memory_state.generation+1",
+                user_id,
             )
             await conn.execute(
-                "DELETE FROM companion_episodes WHERE user_id = $1", user_id
+                "DELETE FROM companion_graph_edges WHERE user_id=$1", user_id
             )
             await conn.execute(
-                "DELETE FROM companion_graph_edges WHERE user_id = $1", user_id
+                "DELETE FROM companion_episodes WHERE user_id=$1", user_id
             )
             await conn.execute(
-                "DELETE FROM companion_graph_nodes WHERE user_id = $1", user_id
+                "DELETE FROM companion_graph_nodes WHERE user_id=$1", user_id
             )
             await conn.execute(
-                "DELETE FROM companion_ephemerals WHERE user_id = $1", user_id
+                "DELETE FROM companion_ephemerals WHERE user_id=$1", user_id
             )
+            prefix = "companion:" + hashlib.sha256(user_id.encode()).hexdigest() + ":"
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                if await conn.fetchval("SELECT to_regclass($1)", table):
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE left(thread_id,length($1))=$1",
+                        prefix,
+                    )
+    return {"status": "forgotten", "memory_enabled": False}
 
-    return {"status": "forgotten"}
+
+@router.post("/memory/{user_id}/resume")
+async def resume_memory(user_id: str, request: Request):
+    """Explicit application/user opt-in. Never exposed as a model tool."""
+    async with connection(request) as conn:
+        await conn.execute(
+            "INSERT INTO companion_memory_state(user_id,enabled) VALUES($1,true) ON CONFLICT(user_id) DO UPDATE SET enabled=true,generation=companion_memory_state.generation+1",
+            user_id,
+        )
+    return {"memory_enabled": True}
 
 
 @router.post("/ephemerals")
 async def add_ephemeral(eph: EphemeralCreate, request: Request):
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
+    async with connection(request) as conn:
         await conn.execute(
             """
             INSERT INTO companion_ephemerals (user_id, description, expires_at)
@@ -387,75 +444,54 @@ async def get_companion_context(
     user_id: str,
     request: Request,
     query: Optional[str] = None,
-    limit: Optional[int] = None,
+    limit: int = Query(default=15, ge=1, le=50),
 ):
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
-        facts = await conn.fetch(
-            """
-            SELECT n.name, n.entity_type, n.salience, n.subject,
-                   e.relationship_type, target.name AS related_to,
-                   e.valence, e.intensity, e.source_episode_id
-            FROM companion_graph_nodes n
-            LEFT JOIN companion_graph_edges e ON n.node_id = e.source_node_id
-                AND e.user_id = $1 AND e.status = 'ACTIVE'
-                AND (e.valid_until IS NULL OR e.valid_until > clock_timestamp())
-            LEFT JOIN companion_graph_nodes target ON e.target_node_id = target.node_id
-            WHERE n.user_id = $1
-            """,
+    vector = await _embed(query) if query else None
+    buckets = {}
+    async with connection(request) as conn:
+        for subject, key in [
+            ("user", "graph_facts"),
+            ("self", "self_facts"),
+            ("shared", "shared_facts"),
+        ]:
+            rows = await conn.fetch(
+                """
+                WITH edge_candidates AS MATERIALIZED (
+                    SELECT e.* FROM companion_graph_edges e
+                    WHERE e.user_id=$1 AND e.subject=$2 AND e.status='ACTIVE'
+                      AND (e.valid_until IS NULL OR e.valid_until>clock_timestamp())
+                    ORDER BY e.embedding <=> $3::halfvec NULLS LAST,e.edge_id LIMIT 200
+                ), node_candidates AS MATERIALIZED (
+                    SELECT n.* FROM companion_graph_nodes n WHERE n.user_id=$1 AND n.subject=$2 AND n.is_subject
+                      AND NOT EXISTS(SELECT 1 FROM companion_graph_edges e WHERE e.source_node_id=n.node_id AND e.status='ACTIVE')
+                    ORDER BY n.embedding <=> $3::halfvec NULLS LAST,n.node_id LIMIT 100
+                ), facts AS (
+                    SELECT n.name,n.entity_type,n.salience,n.subject,e.relationship_type,t.name AS related_to,
+                           e.valence,e.intensity,e.source_episode_id,1-(e.embedding <=> $3::halfvec) AS relevance
+                    FROM edge_candidates e JOIN companion_graph_nodes n ON n.node_id=e.source_node_id
+                    JOIN companion_graph_nodes t ON t.node_id=e.target_node_id
+                    UNION ALL
+                    SELECT name,entity_type,salience,subject,NULL,NULL,0,0.5,NULL,1-(embedding <=> $3::halfvec)
+                    FROM node_candidates
+                ) SELECT * FROM facts
+                ORDER BY COALESCE(relevance,0)+0.01*LEAST(salience,5) DESC,name,relationship_type,related_to LIMIT $4
+                """,
+                user_id,
+                subject,
+                vector,
+                limit,
+            )
+            buckets[key] = [dict(r) for r in rows]
+        ephs = await conn.fetch(
+            "SELECT description,expires_at FROM companion_ephemerals WHERE user_id=$1 AND expires_at>clock_timestamp() ORDER BY expires_at LIMIT 20",
             user_id,
         )
-
-        ephemerals = await conn.fetch(
-            """
-            SELECT description, expires_at
-            FROM companion_ephemerals
-            WHERE user_id = $1 AND expires_at > clock_timestamp()
-            ORDER BY expires_at ASC
-            """,
-            user_id,
+        enabled = await conn.fetchval(
+            "SELECT enabled FROM companion_memory_state WHERE user_id=$1", user_id
         )
-
-    def _fact_dict(r):
-        return {
-            "name": r["name"],
-            "entity_type": r["entity_type"],
-            "salience": r["salience"],
-            "subject": r["subject"],
-            "relationship_type": r["relationship_type"],
-            "related_to": r["related_to"],
-            "valence": float(r["valence"] or 0.0),
-            "intensity": float(r["intensity"] or 0.5),
-            "source_episode_id": str(r["source_episode_id"]) if r["source_episode_id"] else None,
-        }
-
-    user_facts = [_fact_dict(r) for r in facts if r["subject"] == "user"]
-    self_facts = [_fact_dict(r) for r in facts if r["subject"] == "self"]
-    shared_facts = [_fact_dict(r) for r in facts if r["subject"] == "shared"]
-
-    # Relevance ranking applies per group, keyed by the query.
-    if query:
-        if user_facts:
-            user_facts = await _rank_facts_by_relevance(query, user_facts)
-        if self_facts:
-            self_facts = await _rank_facts_by_relevance(query, self_facts)
-        if shared_facts:
-            shared_facts = await _rank_facts_by_relevance(query, shared_facts)
-
-    if limit is not None and limit > 0:
-        user_facts = user_facts[:limit]
-        self_facts = self_facts[:limit]
-        shared_facts = shared_facts[:limit]
-
-    return {
-        "graph_facts": user_facts,          # backward-compatible: facts about the user
-        "self_facts": self_facts,           # the companion's model of itself
-        "shared_facts": shared_facts,       # relationship facts (growing together)
-        "ephemerals": [
-            {"description": r["description"], "expires_at": str(r["expires_at"])}
-            for r in ephemerals
-        ],
+    return buckets | {
+        "ephemerals": [dict(r) for r in ephs],
+        "memory_enabled": enabled is not False,
     }
 
 
@@ -473,20 +509,22 @@ async def fact_provenance(
     Matches edges on the (normalized) source entity and returns the source
     episode content so you can see exactly where a memory came from.
     """
-    pool = request.app.state.pool
     subj = _normalize_subject(subject)
-    rel_key = normalize_name(name)
-    target_key = normalize_name(relationship_to) if relationship_to else None
+    rel_key = normalize_name(resolve_entity(name))
+    target_key = (
+        normalize_name(resolve_entity(relationship_to)) if relationship_to else None
+    )
     rel_norm = normalize_relation(relationship_type) if relationship_type else None
 
-    async with pool.acquire() as conn:
+    async with connection(request) as conn:
         rows = await conn.fetch(
             """
             SELECT e.relationship_type, e.valence, e.intensity, e.status, e.valid_until,
                    ep.episode_id, ep.content AS episode_content, ep.created_at
             FROM companion_graph_edges e
             JOIN companion_graph_nodes s ON s.node_id = e.source_node_id
-            LEFT JOIN companion_episodes ep ON ep.episode_id = e.source_episode_id
+            LEFT JOIN companion_fact_sources fs ON fs.edge_id=e.edge_id AND fs.user_id=e.user_id
+            LEFT JOIN companion_episodes ep ON ep.episode_id=fs.episode_id AND ep.user_id=e.user_id
             WHERE e.user_id = $1
               AND s.normalize_name_key = $2
               AND s.subject = $3
@@ -506,66 +544,46 @@ async def fact_provenance(
 
     result = []
     for r in rows:
-        result.append({
-            "relationship_type": r["relationship_type"],
-            "valence": float(r["valence"] or 0.0),
-            "intensity": float(r["intensity"] or 0.5),
-            "status": r["status"],
-            "valid_until": str(r["valid_until"]) if r["valid_until"] else None,
-            "source_episode_id": str(r["episode_id"]) if r["episode_id"] else None,
-            "source_episode_content": r["episode_content"],
-            "inferred_at": str(r["created_at"]) if r["created_at"] else None,
-        })
+        result.append(
+            {
+                "relationship_type": r["relationship_type"],
+                "valence": float(r["valence"] or 0.0),
+                "intensity": float(
+                    r["intensity"] if r["intensity"] is not None else 0.5
+                ),
+                "status": r["status"],
+                "valid_until": str(r["valid_until"]) if r["valid_until"] else None,
+                "source_episode_id": str(r["episode_id"]) if r["episode_id"] else None,
+                "source_episode_content": r["episode_content"],
+                "inferred_at": str(r["created_at"]) if r["created_at"] else None,
+            }
+        )
     return {"fact": name, "sources": result}
 
 
-async def _rank_facts_by_relevance(query: str, facts: list) -> list:
-    """Rank graph facts by cosine similarity between the query embedding and each
-    fact's name embedding, blended with salience."""
-    emb_client = get_embedding_client()
-
-    query_resp = await emb_client.embeddings.create(
-        input=query, model=os.getenv("EMBEDDING_MODEL_NAME")
+async def _embed(text: str) -> str:
+    response = await get_embedding_client().embeddings.create(
+        input=text, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
-    query_vec = query_resp.data[0].embedding
-
-    names = [f["name"] for f in facts]
-    name_resp = await emb_client.embeddings.create(
-        input=names, model=os.getenv("EMBEDDING_MODEL_NAME")
-    )
-
-    def _cos(a, b):
-        dot = sum(x * y for x, y in zip(a, b))
-        na = sum(x * x for x in a) ** 0.5
-        nb = sum(y * y for y in b) ** 0.5
-        return dot / (na * nb) if na and nb else 0.0
-
-    for fact, emb in zip(facts, name_resp.data):
-        similarity = _cos(query_vec, emb.embedding)
-        fact["relevance"] = round(similarity, 4)
-        fact["_score"] = similarity + 0.1 * fact.get("salience", 1.0)
-
-    facts.sort(key=lambda f: f.get("_score", 0.0), reverse=True)
-    for f in facts:
-        f.pop("_score", None)
-    return facts
+    return json.dumps(response.data[0].embedding)
 
 
 @router.post("/context/search")
 async def search_episodic_context(
-    user_id: str, query: str, request: Request, limit: int = 5
+    user_id: str,
+    query: str,
+    request: Request,
+    limit: int = Query(default=5, ge=1, le=50),
 ):
-    pool = request.app.state.pool
-
     emb_resp = await get_embedding_client().embeddings.create(
         input=query, model=os.getenv("EMBEDDING_MODEL_NAME")
     )
     embedding = emb_resp.data[0].embedding
 
-    async with pool.acquire() as conn:
+    async with connection(request) as conn:
         rows = await conn.fetch(
             """
-            SELECT content, 1 - (embedding <=> $1::halfvec) AS similarity
+            SELECT episode_id, content, 1 - (embedding <=> $1::halfvec) AS similarity
             FROM companion_chunks
             WHERE user_id = $2
             ORDER BY embedding <=> $1::halfvec
@@ -593,10 +611,9 @@ class BackstoryRequest(BaseModel):
 
 @router.post("/backstory")
 async def seed_backstory(req: BackstoryRequest, request: Request):
-    pool = request.app.state.pool
     stored = 0
 
-    async with pool.acquire() as conn:
+    async with connection(request) as conn:
         # The companion's self-node is created by the first backstory fact; no
         # separate pre-seed needed (avoids conflicting unique constraints).
         for fact in req.backstory:
@@ -607,6 +624,8 @@ async def seed_backstory(req: BackstoryRequest, request: Request):
                 relationship_to=fact.relationship_to,
                 relationship_type=fact.relationship_type,
                 subject="self",
+                valence=fact.valence,
+                intensity=fact.intensity,
             )
             await _store_fact_conn(conn, f)
             stored += 1
@@ -619,6 +638,8 @@ async def seed_backstory(req: BackstoryRequest, request: Request):
                 relationship_to=fact.relationship_to,
                 relationship_type=fact.relationship_type,
                 subject="shared",
+                valence=fact.valence,
+                intensity=fact.intensity,
             )
             await _store_fact_conn(conn, f)
             stored += 1
@@ -629,34 +650,57 @@ async def seed_backstory(req: BackstoryRequest, request: Request):
 async def _store_fact_conn(conn, fact: GraphFact) -> None:
     """Shared fact-storage helper (add_graph_fact body extracted for reuse)."""
     name = resolve_entity(fact.name)
-    relationship_to = resolve_entity(fact.relationship_to) if fact.relationship_to else None
+    relationship_to = (
+        resolve_entity(fact.relationship_to) if fact.relationship_to else None
+    )
     relationship_type = normalize_relation(fact.relationship_type)
     subject = _normalize_subject(fact.subject)
     valence = max(-1.0, min(1.0, float(fact.valence or 0.0)))
-    intensity = max(0.0, min(1.0, float(fact.intensity if fact.intensity is not None else 0.5)))
+    intensity = max(
+        0.0, min(1.0, float(fact.intensity if fact.intensity is not None else 0.5))
+    )
     source_episode_id = fact.source_episode_id or None
 
-    source = await _upsert_node(
-        conn, fact.user_id, name, fact.entity_type, subject=subject,
-        existing_name=name, bump_salience=True,
-    )
-    if relationship_to and relationship_type:
-        target = await _upsert_node(
-            conn, fact.user_id, relationship_to, "entity", subject=subject,
-            existing_name=relationship_to, bump_salience=False,
+    if source_episode_id:
+        from uuid import UUID
+
+        try:
+            episode_uuid = UUID(source_episode_id)
+        except ValueError:
+            raise HTTPException(422, "Invalid source episode ID")
+        if not await conn.fetchval(
+            "SELECT 1 FROM companion_episodes WHERE user_id=$1 AND episode_id=$2",
+            fact.user_id,
+            episode_uuid,
+        ):
+            raise HTTPException(403, "Source episode does not belong to this user")
+    else:
+        episode_uuid = None
+    vector = (
+        await _embed(
+            f"{name} {relationship_type.replace(chr(95), chr(32))} {relationship_to}"
         )
-        if target:
+        if relationship_to and relationship_type
+        else None
+    )
+    async with conn.transaction():
+        source = await _upsert_node(
+            conn,
+            fact.user_id,
+            name,
+            fact.entity_type,
+            subject=subject,
+            bump_salience=True,
+        )
+        if relationship_to and relationship_type:
+            target = await _upsert_node(
+                conn, fact.user_id, relationship_to, "entity", subject=subject
+            )
+            # Preserve prior emotional state as a closed version when it changes.
             await conn.execute(
-                """
-                INSERT INTO companion_graph_edges
-                    (user_id, source_node_id, target_node_id, relationship_type, subject, valence, intensity, source_episode_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                ON CONFLICT (user_id, source_node_id, target_node_id, relationship_type, subject)
-                DO UPDATE SET status = 'ACTIVE', valid_until = NULL,
-                              valence = EXCLUDED.valence,
-                              intensity = EXCLUDED.intensity,
-                              source_episode_id = COALESCE(EXCLUDED.source_episode_id, companion_graph_edges.source_episode_id)
-                """,
+                """UPDATE companion_graph_edges SET status='INACTIVE',valid_until=clock_timestamp()
+                WHERE user_id=$1 AND source_node_id=$2 AND target_node_id=$3 AND relationship_type=$4 AND subject=$5
+                  AND status='ACTIVE' AND (valence IS DISTINCT FROM $6 OR intensity IS DISTINCT FROM $7)""",
                 fact.user_id,
                 source["node_id"],
                 target["node_id"],
@@ -664,8 +708,31 @@ async def _store_fact_conn(conn, fact: GraphFact) -> None:
                 subject,
                 valence,
                 intensity,
-                source_episode_id,
             )
+            row = await conn.fetchrow(
+                """INSERT INTO companion_graph_edges
+                (user_id,source_node_id,target_node_id,relationship_type,subject,valence,intensity,source_episode_id,embedding)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::halfvec)
+                ON CONFLICT(user_id,source_node_id,target_node_id,relationship_type,subject) WHERE status='ACTIVE'
+                DO UPDATE SET embedding=EXCLUDED.embedding
+                RETURNING edge_id""",
+                fact.user_id,
+                source["node_id"],
+                target["node_id"],
+                relationship_type,
+                subject,
+                valence,
+                intensity,
+                episode_uuid,
+                vector,
+            )
+            if episode_uuid:
+                await conn.execute(
+                    "INSERT INTO companion_fact_sources(edge_id,user_id,episode_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+                    row["edge_id"],
+                    fact.user_id,
+                    episode_uuid,
+                )
 
 
 def _chunk_text(text: str, chunk_size: int = 500) -> list:
@@ -674,3 +741,65 @@ def _chunk_text(text: str, chunk_size: int = 500) -> list:
     for i in range(0, len(words), chunk_size):
         chunks.append(" ".join(words[i : i + chunk_size]))
     return chunks or [text]
+
+
+@router.get("/memory/{user_id}/state")
+async def memory_state(user_id: str, request: Request):
+    async with connection(request) as conn:
+        row = await conn.fetchrow(
+            "SELECT enabled,generation FROM companion_memory_state WHERE user_id=$1",
+            user_id,
+        )
+    return dict(row) if row else {"enabled": True, "generation": 0}
+
+
+@router.post("/memory/{user_id}/reindex")
+async def reindex_memory(user_id: str, request: Request):
+    """Backfill persisted assertion vectors after a schema or embedding-model migration."""
+    async with connection(request) as conn:
+        nodes = await conn.fetch(
+            "SELECT node_id,name FROM companion_graph_nodes WHERE user_id=$1", user_id
+        )
+        edges = await conn.fetch(
+            """SELECT e.edge_id,n.name,e.relationship_type,t.name AS target
+            FROM companion_graph_edges e JOIN companion_graph_nodes n ON n.node_id=e.source_node_id
+            JOIN companion_graph_nodes t ON t.node_id=e.target_node_id WHERE e.user_id=$1""",
+            user_id,
+        )
+        for node in nodes:
+            await conn.execute(
+                "UPDATE companion_graph_nodes SET embedding=$2::halfvec WHERE node_id=$1",
+                node["node_id"],
+                await _embed(node["name"]),
+            )
+        for edge in edges:
+            text = f"{edge['name']} {edge['relationship_type'].replace('_', ' ')} {edge['target']}"
+            await conn.execute(
+                "UPDATE companion_graph_edges SET embedding=$2::halfvec WHERE edge_id=$1",
+                edge["edge_id"],
+                await _embed(text),
+            )
+    return {"nodes_indexed": len(nodes), "facts_indexed": len(edges)}
+
+
+class LegacyPurge(BaseModel):
+    confirmation: str
+
+
+@router.post("/legacy-checkpoints/purge")
+async def purge_legacy_checkpoints(body: LegacyPurge, request: Request):
+    """Explicit administrative cleanup; deliberately absent from model tools."""
+    if not request.state.principal.get("admin"):
+        raise HTTPException(403, "Administrator credential required")
+    if body.confirmation != "delete unowned checkpoint history":
+        raise HTTPException(
+            422, "Explicit legacy-history deletion confirmation required"
+        )
+    async with connection(request) as conn:
+        async with conn.transaction():
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                if await conn.fetchval("SELECT to_regclass($1)", table):
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE thread_id !~ '^[a-z]+:[0-9a-f]{{64}}:'"
+                    )
+    return {"status": "legacy checkpoints deleted"}

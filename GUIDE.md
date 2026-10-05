@@ -62,7 +62,7 @@ The six patterns in this project span this taxonomy:
 | Enterprise Knowledge | Long-term + Archival | Access-controlled + Flat | RRF (vector + FTS) + role gate |
 | Adaptive Tutor | Long-term | Graph + Temporal | Skill tree + decay SQL |
 | Multi-Agent Swarm | Short-term | Flat + Locked | FOR UPDATE SKIP LOCKED |
-| AI Companion | Long-term + Short-term | Graph + Temporal | Bitemporal facts + TTL |
+| AI Companion | Long-term + Short-term | Graph + Temporal | Versioned facts + TTL |
 
 ---
 
@@ -160,15 +160,15 @@ An internal knowledge base agent serving employees across an organization. Diffe
 - **Role-based access** via `WHERE allowed_role = $3`
 - **Temporal validity** via `WHERE (valid_until IS NULL OR valid_until > now())`
 
-The RRF formula `vec_score + text_score` ensures that documents matching by either vector or keyword surface in the results, with documents matching both ranking highest.
+RRF sums `1 / (60 + rank)` from independently retrieved vector and lexical candidate lists. Eligibility is checked in both lists. The server authenticates the caller and verifies requested role membership before searching.
 
-**Why RRF over weighted blending?** Weighted blending requires tuning weights per query domain. RRF is parameter-free and robust across diverse query types — from exact policy lookups ("what's the password rotation policy") to open-ended searches ("what are my remote work options").
+**Why RRF over weighted blending?** Weighted blending requires tuning weights per query domain. RRF avoids blending raw scores on incompatible scales; its rank constant, candidate limits, and relevance thresholds still need evaluation across query types — from exact policy lookups ("what's the password rotation policy") to open-ended searches ("what are my remote work options").
 
 ### Compare and Contrast
 
 | Approach | Strength | Weakness | When to Use |
 |----------|----------|----------|-------------|
-| **RRF + RBAC (this project)** | Zero-parameter hybrid ranking; access enforced at retrieval | Two separate indexes to maintain; FTS quality depends on language config | Regulated industries, multi-tenant SaaS, internal knowledge bases |
+| **RRF + RBAC (this project)** | Rank fusion with k=60; access enforced at retrieval | Two separate indexes to maintain; FTS quality depends on language config | Regulated industries, multi-tenant SaaS, internal knowledge bases |
 | **Pure vector search** | Simple; good for semantic similarity | Misses exact keyword matches ("NDA" → "Non-Disclosure Agreement") | Q&A over unstructured text |
 | **Pure FTS (Elasticsearch)** | Excellent keyword precision; faceted search | No semantic understanding; misses conceptually similar but lexically different docs | E-commerce search, log search |
 | **Graph RAG (Neo4j + LLM)** | Captures document relationships and citations | Complex infrastructure; slow ingestion | Legal document analysis, research literature |
@@ -233,7 +233,7 @@ A coordinated team of specialized agents (e.g., sentiment analysis, entity extra
 
 **Storage**: The `swarm_blackboard` table is a distributed task queue. Each row represents a task with `status` (PENDING → IN_PROGRESS → COMPLETED), an optional `assigned_agent`, and a `payload` (JSONB) for task-specific data.
 
-**Coordination Strategy**: PostgreSQL's `FOR UPDATE SKIP LOCKED` clause provides lock-free task claiming:
+**Coordination Strategy**: PostgreSQL's `FOR UPDATE SKIP LOCKED` clause provides row-locked task claiming with leases:
 
 ```sql
 SELECT task_id, task_name, payload
@@ -248,7 +248,7 @@ When multiple agents execute this query simultaneously:
 1. PostgreSQL acquires a row-level lock on the first PENDING row for one agent
 2. Other agents **skip** the locked row and move to the next available one
 3. Each agent updates their claimed row to `IN_PROGRESS` within the same transaction
-4. No polling, no external lock manager, no race conditions
+4. A random five-minute lease identifies the claimant; completion verifies the lease and state. Expired claims are reclaimable.
 
 **Why SKIP LOCKED over a message queue (RabbitMQ/Kafka)?** For agents that already need a database for state persistence, using the same database as a lightweight task queue eliminates an additional infrastructure dependency. This pattern works well for moderate throughput (<1K tasks/second). For high-throughput streaming, a dedicated message broker is preferable.
 
@@ -303,7 +303,7 @@ An AI companion or personal assistant that maintains a rich, evolving model of i
 | **Episodic (Persistent)** | `companion_episodes`, `companion_chunks` | Permanent (archival) | "Talked about wanting a 2BR apartment" |
 | **Ephemeral (Transient)** | `companion_ephemerals` | TTL-based expiration | "Feeling excited this week" (expires in 24h) |
 
-**Graph Model**: Entities (`companion_graph_nodes`) are connected by typed, directed edges (`companion_graph_edges`). Edges can be terminated by setting `status='INACTIVE'` or `valid_until` — this implements bitemporal state, where a fact has both a real-world validity period and a database-level status flag. For example, "Alice WORKS_AT CompanyX" can be marked inactive when she changes jobs, but the historical fact remains queryable for past-date context.
+**Graph Model**: Entities are connected by typed edges with observed validity intervals and recording timestamps. Termination closes a version; reassertion creates a new version. Multiple source episodes remain associated with a fact. This preserves observed history but does not implement arbitrary retrospective bitemporal correction.
 
 **Three-Subject Model**: Every node and edge carries a `subject` column — `user`, `self`, or `shared`:
 
@@ -323,7 +323,7 @@ Because both sides live in one graph, the retrieve node can **cross-reference** 
 
 | Approach | Strength | Weakness | When to Use |
 |----------|----------|----------|-------------|
-| **Graph + Episodic + Ephemeral (this project)** | Models all three temporal domains; typed relationships enable reasoning; bitemporal edges support history | Complex schema; edge traversal can be expensive at scale | Personal AI companions, NPC dialogue systems, customer 360 views |
+| **Graph + Episodic + Ephemeral (this project)** | Models all three temporal domains; typed relationships enable reasoning; versioned edges preserve observed history | Complex schema; edge traversal can be expensive at scale | Personal AI companions, NPC dialogue systems, customer 360 views |
 | **MemGPT / Letta** | OS-inspired memory hierarchy (core ↔ archival); automatic memory management | Fixed memory tiers; limited relationship modeling | Chat-oriented agents with long conversation histories |
 | **Neo4j-native graph agents** | Native graph traversal; optimized for deep relationship chains | Separate infrastructure; embedding generation is external | Social network analysis, recommendation engines |
 | **LangChain ConversationBufferMemory** | Dead simple; just stores recent messages | No persistence across restarts; no entity extraction; context window limits | Quick prototypes, single-session bots |
@@ -350,16 +350,18 @@ The LangGraph agent uses a **4-node graph**: `retrieve_companion_context` → `a
 
 ## Comparative Analysis
 
-### Memory Retrieval Latency Characteristics
+### Memory Retrieval Workloads
 
-| Pattern | Query Type | Expected Latency | Scaling Bottleneck |
+No latency benchmark is established by this demo. Measure query plans, filtered recall, and end-to-end latency on representative data.
+
+| Pattern | Query Type | Measured Latency | Scaling Bottleneck |
 |---------|-----------|-----------------|-------------------|
-| Developer | HNSW ANN + trgm filter | <10ms | Index build time on symbol insert |
-| Task | HNSW ANN + range filter | <5ms | HNSW graph size at >1M trajectories |
-| Enterprise | RRF (vector + FTS) + joins | <20ms | tsvector GIN index size |
-| Tutor | Aggregation query (CTE) | <5ms | Unlikely (small cardinality) |
-| Swarm | SKIP LOCKED SELECT + UPDATE | <5ms (contended) | Contention at >100 concurrent agents |
-| Companion | Multiple independent queries | <15ms | Graph edge traversal at >10K nodes |
+| Developer | HNSW ANN + trgm filter | Not measured | Index build time on symbol insert |
+| Task | HNSW ANN + range filter | Not measured | HNSW graph size at >1M trajectories |
+| Enterprise | RRF (vector + FTS) + joins | Not measured | tsvector GIN index size |
+| Tutor | Aggregation query (CTE) | Not measured | Unlikely (small cardinality) |
+| Swarm | SKIP LOCKED SELECT + UPDATE | Not measured | Contention at >100 concurrent agents |
+| Companion | Multiple independent queries | Not measured | Graph edge traversal at >10K nodes |
 
 ### Agent Complexity Comparison
 
@@ -426,7 +428,7 @@ For each agent to become production-ready using LangGraph's full capabilities:
 
 **Swarm Agent**: Already has a supervisor + Send API fan-out. A further production upgrade would compile each worker as a subgraph, add a merge/rollback policy for failed workers, and support nested hierarchies (supervisors of supervisors) with escalation paths.
 
-**Companion Agent**: Add a fact extraction node that analyzes the conversation and writes new graph nodes/edges, an importance scorer that curates the context window when facts exceed limits, and a personality modulator that adjusts tone based on ephemeral emotional state.
+**Companion Agent**: Extraction, persisted assertion ranking, bounded prompts, and deletion-aware checkpoints are implemented. Production work still needs labeled retrieval and answer-quality evaluation, explicit conflict policies, and operational auditing.
 
 ### Why the Focus on Infrastructure First
 
@@ -440,7 +442,7 @@ Building the memory engine first — before adding complex agent graph logic —
 Add LangSmith/LangFuse callbacks to trace retrieval-to-generation pipelines. Log every memory engine query with timing, result count, and error codes.
 
 ### Testing and Evaluation
-The 54-test suite in `tests/` validates functional correctness. For production, add:
+The deterministic suite in `tests/` validates functional correctness. For production, add:
 - **Retrieval quality evals**: Precision@K and NDCG for each pattern using labeled query→document pairs
 - **Concurrency stress tests**: 100+ parallel swarm agents claiming tasks under load
 - **Decay accuracy tests**: Pre-compute expected decayed scores and assert within tolerance
@@ -449,4 +451,4 @@ The 54-test suite in `tests/` validates functional correctness. For production, 
 ### Scaling
 - For >1M vectors in the developer/task patterns, consider IVF instead of HNSW for faster index builds
 - For the companion graph, consider adding recursive CTEs for deeper relationship traversal (friend-of-friend queries)
-- For the swarm blackboard, add a `claimed_at` timestamp and a reaper process that releases tasks stalled in `IN_PROGRESS` beyond a timeout
+- For the swarm blackboard, add lease renewal for work longer than the current five-minute lease and idempotent external side effects.

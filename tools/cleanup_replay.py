@@ -60,8 +60,11 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine-url", default=MEMORY_ENGINE_URL)
     parser.add_argument("--user-id", nargs="+", help="user ids to forget")
-    parser.add_argument("--all-replay", action="store_true",
-                        help="forget every user whose id starts with 'trace-replay'")
+    parser.add_argument(
+        "--all-replay",
+        action="store_true",
+        help="forget every user whose id starts with 'trace-replay'",
+    )
     args = parser.parse_args()
 
     user_ids = list(args.user_id or [])
@@ -76,7 +79,11 @@ async def main() -> int:
             return 0
         parser.error("provide --user-id or --all-replay")
 
-    async with httpx.AsyncClient(base_url=args.engine_url, timeout=30.0) as client:
+    async with httpx.AsyncClient(
+        base_url=args.engine_url,
+        timeout=30.0,
+        headers={"Authorization": "Bearer " + os.environ["MEMORY_API_TOKEN"]},
+    ) as client:
         for uid in user_ids:
             resp = await client.delete(f"/companion/memory/{uid}")
             if resp.status_code == 200:

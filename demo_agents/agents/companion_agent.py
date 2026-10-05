@@ -2,18 +2,25 @@ import os
 import json
 from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END, add_messages
-from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import COMPANION_TOOLS
 from .checkpointer import get_checkpointer
+from .runtime import (
+    auth_headers,
+    refresh_messages,
+    prompt_messages,
+    ScopedToolNode,
+    ScopedGraph,
+)
 
 MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 
 
 class AgentState(TypedDict):
     user_id: str
+    forgotten: bool
+    memory_enabled: bool
     user_message: str
     retrieved_context: str
     extracted_facts: str
@@ -40,9 +47,21 @@ extraction_llm = ChatOpenAI(
 # Predicates that describe a shared affinity — if the user and the companion's
 # self-model both carry one of these for the same entity, they share it.
 _AFFINITY_PREDICATES = {
-    "likes", "loves", "enjoys", "interested_in", "prefers", "plays", "reads",
-    "watches", "listens_to", "writes", "values", "misses", "has_hobby",
-    "interests", "appreciates",
+    "likes",
+    "loves",
+    "enjoys",
+    "interested_in",
+    "prefers",
+    "plays",
+    "reads",
+    "watches",
+    "listens_to",
+    "writes",
+    "values",
+    "misses",
+    "has_hobby",
+    "interests",
+    "appreciates",
 }
 
 
@@ -80,7 +99,7 @@ def _find_common_ground(user_facts: list, self_facts: list) -> list:
 async def retrieve_companion_context(state: AgentState):
     import httpx
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
         res = await client.get(
             f"{MEMORY_ENGINE_URL}/companion/context",
             params={
@@ -89,6 +108,7 @@ async def retrieve_companion_context(state: AgentState):
                 "limit": 15,
             },
         )
+        res.raise_for_status()
         data = res.json()
 
     user_facts = data.get("graph_facts", [])
@@ -99,8 +119,14 @@ async def retrieve_companion_context(state: AgentState):
     def _fmt(facts, prefix="you"):
         parts = []
         for f in facts:
-            rel = f" {f['relationship_type']} {f['related_to']}" if f.get("related_to") else ""
-            parts.append(f"{f['name']} ({f['entity_type']}){rel}")
+            rel = (
+                f" {f['relationship_type']} {f['related_to']}"
+                if f.get("related_to")
+                else ""
+            )
+            parts.append(
+                f"{f['name']} ({f['entity_type']}){rel} [valence={f.get('valence', 0)}, intensity={f.get('intensity', 0.5)}]"
+            )
         return "; ".join(parts) if parts else "(none yet)"
 
     user_str = _fmt(user_facts, "the user")
@@ -135,28 +161,20 @@ async def retrieve_companion_context(state: AgentState):
         f"Memory Context:\n{context_str}"
     )
 
-    existing = state.get("messages", [])
-    if existing:
-        messages = list(existing)
-        if getattr(messages[0], "type", "") == "system":
-            messages[0] = SystemMessage(content=system_content)
-        else:
-            messages.insert(0, SystemMessage(content=system_content))
-        messages.append(HumanMessage(content=state["user_message"]))
-    else:
-        messages = [
-            SystemMessage(content=system_content),
-            HumanMessage(content=state["user_message"]),
-        ]
+    messages = refresh_messages(
+        system_content, state.get("messages", []), state["user_message"]
+    )
 
     return {
         "retrieved_context": context_str,
+        "forgotten": False,
+        "memory_enabled": data.get("memory_enabled", True),
         "messages": messages,
     }
 
 
 async def agent_node(state: AgentState):
-    response = await llm_with_tools.ainvoke(state["messages"])
+    response = await llm_with_tools.ainvoke(prompt_messages(state["messages"]))
     return {"messages": [response]}
 
 
@@ -184,6 +202,8 @@ async def extract_memory(state: AgentState):
     terminated relationships, and an episode."""
     import httpx
 
+    if state.get("forgotten") or not state.get("memory_enabled", True):
+        return {"extracted_facts": "{}"}
     user_msg = state.get("user_message", "")
     agent_msg = _last_assistant_content(state.get("messages", []))
 
@@ -236,26 +256,44 @@ Rules:
         data = json.loads(content)
     except Exception:
         data = {}
+    if not isinstance(data, dict):
+        data = {}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
         # Create the episode first so facts can reference it for provenance.
-        episode_content = data.get("episode_content") or (
-            f"User: {user_msg}\nCompanion: {agent_msg}"
-        )
+        episode_content = f"User: {user_msg}\nCompanion: {agent_msg}"
         episode_res = await client.post(
             f"{MEMORY_ENGINE_URL}/companion/episodes",
             json={"user_id": state["user_id"], "content": episode_content},
         )
-        source_episode_id = None
-        if episode_res.status_code == 200:
-            source_episode_id = episode_res.json().get("episode_id")
+        episode_res.raise_for_status()
+        source_episode_id = episode_res.json()["episode_id"]
 
-        for subject, key in (("user", "user_facts"), ("self", "self_facts"),
-                             ("shared", "shared_facts")):
+        terminated = data.get("terminated_edges", []) or []
+        for t in terminated:
+            if not t.get("name"):
+                continue
+            terminate_res = await client.post(
+                f"{MEMORY_ENGINE_URL}/companion/facts/terminate",
+                json={
+                    "user_id": state["user_id"],
+                    "name": t["name"],
+                    "relationship_to": t.get("relationship_to"),
+                    "relationship_type": t.get("relationship_type"),
+                    "subject": t.get("subject", "user"),
+                },
+            )
+            terminate_res.raise_for_status()
+
+        for subject, key in (
+            ("user", "user_facts"),
+            ("self", "self_facts"),
+            ("shared", "shared_facts"),
+        ):
             for f in data.get(key, []) or []:
                 if not f.get("name"):
                     continue
-                await client.post(
+                fact_res = await client.post(
                     f"{MEMORY_ENGINE_URL}/companion/facts",
                     json={
                         "user_id": state["user_id"],
@@ -269,20 +307,7 @@ Rules:
                         "source_episode_id": source_episode_id,
                     },
                 )
-
-        terminated = data.get("terminated_edges", []) or []
-        for t in terminated:
-            if not t.get("name"):
-                continue
-            await client.post(
-                f"{MEMORY_ENGINE_URL}/companion/facts/terminate",
-                json={
-                    "user_id": state["user_id"],
-                    "name": t["name"],
-                    "relationship_to": t.get("relationship_to"),
-                    "relationship_type": t.get("relationship_type"),
-                },
-            )
+                fact_res.raise_for_status()
 
     return {
         "extracted_facts": json.dumps(data),
@@ -290,10 +315,14 @@ Rules:
 
 
 def build_companion_graph(checkpointer: BaseCheckpointSaver | None = None):
+    if checkpointer is not None and not hasattr(checkpointer, "memory_guard"):
+        raise ValueError(
+            "Companion persistence requires the deletion-aware PostgreSQL saver"
+        )
     builder = StateGraph(AgentState)
     builder.add_node("retrieve", retrieve_companion_context)
     builder.add_node("agent", agent_node)
-    builder.add_node("tools", ToolNode(COMPANION_TOOLS))
+    builder.add_node("tools", ScopedToolNode(COMPANION_TOOLS))
     builder.add_node("extract", extract_memory)
 
     builder.set_entry_point("retrieve")
@@ -303,10 +332,16 @@ def build_companion_graph(checkpointer: BaseCheckpointSaver | None = None):
         should_continue,
         {"tools": "tools", "extract": "extract", END: END},
     )
-    builder.add_edge("tools", "agent")
+    builder.add_conditional_edges(
+        "tools",
+        lambda state: END if state.get("forgotten") else "agent",
+        {END: END, "agent": "agent"},
+    )
     builder.add_edge("extract", END)
 
-    return builder.compile(checkpointer=checkpointer)
+    return ScopedGraph(
+        builder.compile(checkpointer=checkpointer), "companion", checkpointer
+    )
 
 
 async def build_companion_graph_with_checkpointer():

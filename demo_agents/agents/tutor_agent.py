@@ -1,12 +1,17 @@
 import os
 from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END, add_messages
-from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import TUTOR_TOOLS
 from .checkpointer import get_checkpointer
+from .runtime import (
+    auth_headers,
+    refresh_messages,
+    prompt_messages,
+    ScopedToolNode,
+    ScopedGraph,
+)
 
 
 class AgentState(TypedDict):
@@ -29,14 +34,15 @@ llm_with_tools = llm.bind_tools(TUTOR_TOOLS)
 async def assess_skill_gaps(state: AgentState):
     import httpx
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
         res = await client.get(
             f"{os.getenv('MEMORY_ENGINE_URL', 'http://memory-engine:8000')}/tutor/gaps/{state['user_id']}"
         )
+        res.raise_for_status()
         data = res.json()
 
     gaps_str = "\n".join(
-        f"{s['skill_name']}: decayed_score={s['decayed_score']:.3f} [{s['status']}]"
+        f"{s['skill_name']}: decayed_score={s['decayed_score']:.3f} [{s['status']} | Ready: {s.get('ready')} | Prerequisite: {s.get('prerequisite')}]"
         for s in data
     )
 
@@ -48,19 +54,9 @@ async def assess_skill_gaps(state: AgentState):
         f"Skill Gaps (with Ebbinghaus decay):\n{gaps_str}"
     )
 
-    existing = state.get("messages", [])
-    if existing:
-        messages = list(existing)
-        if getattr(messages[0], "type", "") == "system":
-            messages[0] = SystemMessage(content=system_content)
-        else:
-            messages.insert(0, SystemMessage(content=system_content))
-        messages.append(HumanMessage(content=f"Topic request: {state['topic']}\nAssess gaps, recommend, and teach."))
-    else:
-        messages = [
-            SystemMessage(content=system_content),
-            HumanMessage(content=f"Topic request: {state['topic']}\nAssess gaps, recommend, and teach."),
-        ]
+    messages = refresh_messages(
+        system_content, state.get("messages", []), state["topic"]
+    )
 
     return {
         "skill_gaps": gaps_str,
@@ -69,7 +65,7 @@ async def assess_skill_gaps(state: AgentState):
 
 
 async def agent_node(state: AgentState):
-    response = await llm_with_tools.ainvoke(state["messages"])
+    response = await llm_with_tools.ainvoke(prompt_messages(state["messages"]))
     return {"messages": [response]}
 
 
@@ -84,14 +80,18 @@ def build_tutor_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder = StateGraph(AgentState)
     builder.add_node("assess", assess_skill_gaps)
     builder.add_node("agent", agent_node)
-    builder.add_node("tools", ToolNode(TUTOR_TOOLS))
+    builder.add_node("tools", ScopedToolNode(TUTOR_TOOLS))
 
     builder.set_entry_point("assess")
     builder.add_edge("assess", "agent")
-    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    builder.add_conditional_edges(
+        "agent", should_continue, {"tools": "tools", END: END}
+    )
     builder.add_edge("tools", "agent")
 
-    return builder.compile(checkpointer=checkpointer)
+    return ScopedGraph(
+        builder.compile(checkpointer=checkpointer), "tutor", checkpointer
+    )
 
 
 async def build_tutor_graph_with_checkpointer():

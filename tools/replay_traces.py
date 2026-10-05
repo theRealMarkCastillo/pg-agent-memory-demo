@@ -114,7 +114,9 @@ def _strip_code_fence(content: str) -> str:
     return content.strip()
 
 
-async def extract_turn(client, model: str, user_msg: str, agent_msg: str, timeout: float = 90.0) -> dict:
+async def extract_turn(
+    client, model: str, user_msg: str, agent_msg: str, timeout: float = 90.0
+) -> dict:
     """Run the companion extraction prompt for a single turn."""
     prompt = EXTRACTION_PROMPT.format(user_msg=user_msg, agent_msg=agent_msg)
 
@@ -155,8 +157,37 @@ async def extract_turn(client, model: str, user_msg: str, agent_msg: str, timeou
 async def store_extraction(engine, user_id: str, data: dict):
     """POST extracted facts (user/self/shared), terminations, and episode."""
     results = {"facts": 0, "terminated": 0, "episodes": 0}
-    for subject, key in (("user", "user_facts"), ("self", "self_facts"),
-                         ("shared", "shared_facts")):
+    episode_content = data.get("episode_content")
+    if not episode_content:
+        raise ValueError("Extraction must retain its source conversation")
+    episode = await engine.post(
+        "/companion/episodes", json={"user_id": user_id, "content": episode_content}
+    )
+    episode.raise_for_status()
+    episode_id = episode.json()["episode_id"]
+    results["episodes"] = 1
+    for t in data.get("terminated_edges", []) or []:
+        if not t.get("name"):
+            continue
+        r = await engine.post(
+            "/companion/facts/terminate",
+            json={
+                "user_id": user_id,
+                "name": t["name"],
+                "relationship_to": t.get("relationship_to"),
+                "relationship_type": t.get("relationship_type"),
+                "subject": t.get("subject", "user"),
+            },
+        )
+        r.raise_for_status()
+        if r.status_code == 200:
+            results["terminated"] += 1
+
+    for subject, key in (
+        ("user", "user_facts"),
+        ("self", "self_facts"),
+        ("shared", "shared_facts"),
+    ):
         for f in data.get(key, []) or []:
             if not f.get("name"):
                 continue
@@ -169,48 +200,33 @@ async def store_extraction(engine, user_id: str, data: dict):
                     "relationship_to": f.get("relationship_to"),
                     "relationship_type": f.get("relationship_type"),
                     "subject": subject,
+                    "source_episode_id": episode_id,
                     "valence": f.get("valence", 0.0),
                     "intensity": f.get("intensity", 0.5),
                 },
             )
+            r.raise_for_status()
             if r.status_code == 200:
                 results["facts"] += 1
-    for t in data.get("terminated_edges", []) or []:
-        if not t.get("name"):
-            continue
-        r = await engine.post(
-            "/companion/facts/terminate",
-            json={
-                "user_id": user_id,
-                "name": t["name"],
-                "relationship_to": t.get("relationship_to"),
-                "relationship_type": t.get("relationship_type"),
-            },
-        )
-        if r.status_code == 200:
-            results["terminated"] += 1
-    episode_content = data.get("episode_content")
-    if episode_content:
-        r = await engine.post(
-            "/companion/episodes",
-            json={"user_id": user_id, "content": episode_content},
-        )
-        if r.status_code == 200:
-            results["episodes"] += 1
     return results
 
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--traces-dir", default="traces", help="directory of trace exports")
-    parser.add_argument("--user-id", default="trace-replay", help="memory engine user_id")
+    parser.add_argument(
+        "--traces-dir", default="traces", help="directory of trace exports"
+    )
+    parser.add_argument(
+        "--user-id", default="trace-replay", help="memory engine user_id"
+    )
     parser.add_argument("--dry-run", action="store_true", help="print instead of store")
-    parser.add_argument("--max-turns", type=int, default=0, help="limit turns per trace (0=all)")
+    parser.add_argument(
+        "--max-turns", type=int, default=0, help="limit turns per trace (0=all)"
+    )
     args = parser.parse_args()
 
     env = load_env(Path(".env"))
     model = env.get("LLM_MODEL_NAME") or "gpt-4o-mini"
-    base_url = env.get("LLM_BASE_URL") or "http://localhost:8001"
     llm = get_openai_client(env) if not args.dry_run else None
     engine_url = os.getenv("MEMORY_ENGINE_URL", MEMORY_ENGINE_URL)
 
@@ -220,7 +236,11 @@ async def main() -> int:
         return 1
     print(f"Parsed {len(parsed)} traces with conversations.")
 
-    engine = httpx.AsyncClient(base_url=engine_url, timeout=30.0)
+    engine = httpx.AsyncClient(
+        base_url=engine_url,
+        timeout=30.0,
+        headers={"Authorization": "Bearer " + os.environ["MEMORY_API_TOKEN"]},
+    )
     try:
         total = {"facts": 0, "terminated": 0, "episodes": 0}
         for turns, meta in parsed:
@@ -242,21 +262,22 @@ async def main() -> int:
 
 
 async def _process_turns(llm, engine, model, user_id, turns, concurrency: int = 4):
-    """Extract + store turns concurrently. Returns aggregated counters."""
+    """Extract concurrently, then commit strictly in source order."""
     sem = asyncio.Semaphore(concurrency)
-    results = {"facts": 0, "terminated": 0, "episodes": 0}
 
-    async def process(i, turn):
+    async def extract(turn):
         async with sem:
             data = await extract_turn(llm, model, turn.user, turn.assistant)
-            res = await store_extraction(engine, user_id, data)
-            facts = [f["name"] for f in data.get("new_facts", [])]
-            print(f"  turn {i}: {len(facts)} facts {facts[:5]} / {res}", flush=True)
-            return res
+            # Retain the original evidence, not only a lossy generated summary.
+            data["episode_content"] = f"User: {turn.user}\nCompanion: {turn.assistant}"
+            return data
 
-    for res in await asyncio.gather(*(process(i, t) for i, t in enumerate(turns))):
-        for k in results:
-            results[k] += res[k]
+    extracted = await asyncio.gather(*(extract(turn) for turn in turns))
+    results = {"facts": 0, "terminated": 0, "episodes": 0}
+    for data in extracted:
+        stored = await store_extraction(engine, user_id, data)
+        for key in results:
+            results[key] += stored[key]
     return results
 
 

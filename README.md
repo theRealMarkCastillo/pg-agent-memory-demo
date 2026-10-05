@@ -58,7 +58,7 @@ Each pattern addresses a distinct agent archetype with different memory requirem
 | 2 | **Autonomous Task Agent** | Episodic Trajectory Memory | halfvec HNSW + REAL filter | Similarity search with success gate | Experience-based planning |
 | 3 | **Enterprise Knowledge Agent** | Policy & Audit Memory | halfvec HNSW + tsvector GIN | Reciprocal Rank Fusion (RRF) | Role-gated knowledge retrieval |
 | 4 | **Adaptive Tutor** | Skill Tree Memory | CTE + decay function | Forgetting-curve gap analysis | Spaced repetition modeling |
-| 5 | **Multi-Agent Swarm** | Blackboard Memory | FOR UPDATE SKIP LOCKED | Lock-free task claiming | Distributed coordination |
+| 5 | **Multi-Agent Swarm** | Blackboard Memory | FOR UPDATE SKIP LOCKED | Row-locked task claiming with leases | Distributed coordination |
 | 6 | **AI Companion** | Relational Identity Memory | Graph + TTL + chunk HNSW | Multi-domain context merge | Autobiographical memory (user + self + shared) |
 
 For detailed analysis including compare/contrast with alternative approaches, production considerations, and LangGraph integration patterns, see **[GUIDE.md](GUIDE.md)**.
@@ -70,7 +70,10 @@ For detailed analysis including compare/contrast with alternative approaches, pr
 ```bash
 cp .env.example .env
 # Edit .env with your API credentials
-docker compose up --build
+python tools/configure_auth.py
+make build up
+make seed
+make demo
 ```
 
 Once running:
@@ -78,13 +81,13 @@ Once running:
 - **Health check:** `curl http://localhost:8001/health`
 - **Demo output:** `docker logs -f demo-agent-runner`
 
-The `demo-agents` container seeds test data, then runs 12 demos across all six patterns — including multi-turn conversations and real execution (shell commands, HTTP requests, file operations).
+Seeding uses a separate admin credential. The agent runner receives a scoped token. Shell execution is disabled in the Compose runner; local operators can enable the disposable Docker sandbox. See [operating contracts and migration notes](REMEDIATION.md).
 
 ---
 
 ## Configuration
 
-All settings are in `.env`:
+Model settings are in `.env`; `tools/configure_auth.py` creates private API credentials in `.env.auth`:
 
 ```ini
 LLM_BASE_URL=https://api.openai.com/v1      # Any OpenAI-compatible endpoint
@@ -113,14 +116,15 @@ LANGSMITH_PROJECT=eidolon-prod # Project/session to pull traces from
 
 ## Testing and Evaluation
 
-74 tests across 9 modules validate functional correctness, retrieval quality, concurrency safety, and the companion memory pipeline:
+The integration and regression tests validate functional correctness, retrieval quality, concurrency safety, and the companion memory pipeline:
+
+Install the separate engine and test environments described in [REMEDIATION.md](REMEDIATION.md), then run:
 
 ```bash
-make up && make test        # Start engine + run full suite (~45s)
-make test-unit              # Integration tests only (fast)
-make test-eval              # Quality evals only
-make ci                     # Build + start + test + cleanup
+make test PYTHON=.venv-tests/bin/python ENGINE_PYTHON=.venv-engine/bin/python
 ```
+
+The runner creates and removes disposable services. Deterministic embeddings test application logic; real model quality is evaluated separately with explicit provider credentials.
 
 | Module | Tests | Validates |
 |--------|-------|-----------|
@@ -185,7 +189,7 @@ For testing the companion memory with real or synthetic data, see the **`tools/`
 └── tests/
     ├── conftest.py             # Shared fixtures + HTTP helpers
     ├── pytest.ini              # asyncio mode configuration
-    └── test_*.py               # 74 tests across 9 modules
+    └── test_*.py               # The integration and regression tests
 ```
 
 ---
@@ -256,7 +260,7 @@ python tools/benchmark_extraction.py --traces-dir /tmp/conv --sample 30
 python tools/cleanup_replay.py --all-replay
 ```
 
-**Synthetic workflow (deterministic, no API):**
+**Synthetic generation is offline; extraction benchmarking below calls the configured model:**
 ```bash
 python tools/generate_synthetic.py --count 50 --out traces_synthetic
 python tools/benchmark_extraction.py --traces-dir traces_synthetic --all
@@ -296,7 +300,7 @@ Every agent graph is compiled with a `PostgresSaver` checkpointer backed by a co
 ### Current Limitations
 
 - **Most agent graphs are linear 3-node pipelines** — they use tool calling with conditional routing; only the Swarm pattern uses a supervisor + Send API fan-out topology
-- **No conditional routing** — agents don't yet guard against empty retrievals by routing to fallback/deny nodes
+- **Limited fallback routing** — enterprise queries with no authorized policy abstain; other agents still need task-specific fallback policies
 - **No context window management** — the Companion agent ranks facts by salience + relevance, but does not yet prune by token budget
 - **Tools use synchronous HTTP** — real execution tools block the event loop; fine for a demo, not for production concurrency
 

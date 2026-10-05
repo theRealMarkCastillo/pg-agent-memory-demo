@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 import operator
 from typing import TypedDict, Annotated
 import httpx
@@ -9,6 +10,7 @@ from langgraph.types import Send
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import SWARM_TOOLS
 from .checkpointer import get_checkpointer
+from .runtime import auth_headers, bound_args, prompt_messages, ScopedGraph
 
 MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 
@@ -44,11 +46,22 @@ SPECIALTY_MAP = {
 async def supervisor_node(state: SwarmState):
     """Read the shared blackboard and collect every PENDING task for fan-out."""
     workflow_id = state["workflow_id"]
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
         res = await client.get(f"{MEMORY_ENGINE_URL}/swarm/tasks/{workflow_id}")
+        res.raise_for_status()
         tasks = res.json()
 
-    pending = [t for t in tasks if t.get("status") == "PENDING"]
+    now = datetime.now(timezone.utc)
+    pending = [
+        t
+        for t in tasks
+        if t.get("status") == "PENDING"
+        or (
+            t.get("status") == "IN_PROGRESS"
+            and t.get("lease_until")
+            and datetime.fromisoformat(t["lease_until"]) < now
+        )
+    ]
     return {"pending_tasks": pending}
 
 
@@ -96,7 +109,7 @@ async def worker_node(state: SwarmState):
     ]
 
     for _ in range(8):
-        response = await llm_with_tools.ainvoke(messages)
+        response = await llm_with_tools.ainvoke(prompt_messages(messages))
         messages.append(response)
         if not getattr(response, "tool_calls", None):
             break
@@ -106,7 +119,12 @@ async def worker_node(state: SwarmState):
                 result = f"Unknown tool '{tc['name']}'."
             else:
                 try:
-                    result = tool.invoke(tc["args"])
+                    args = bound_args(state, tc["args"])
+                    if tc["name"] == "claim_next_task":
+                        raise ValueError("Workers must claim their assigned task")
+                    if tc["name"] in ("claim_task", "complete_swarm_task"):
+                        args["task_id"] = task["task_id"]
+                    result = await tool.ainvoke(args)
                 except Exception as e:
                     result = f"Tool error: {e}"
             messages.append(
@@ -132,8 +150,9 @@ async def worker_node(state: SwarmState):
 async def aggregate_node(state: SwarmState):
     """Collect worker reports and snapshot the final blackboard state."""
     workflow_id = state["workflow_id"]
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
         res = await client.get(f"{MEMORY_ENGINE_URL}/swarm/tasks/{workflow_id}")
+        res.raise_for_status()
         tasks = res.json()
 
     board = "\n".join(
@@ -141,7 +160,9 @@ async def aggregate_node(state: SwarmState):
         for t in tasks
     )
     reports = state.get("reports", [])
-    summary = "\n".join(f"- {r}" for r in reports) if reports else "(no tasks to process)"
+    summary = (
+        "\n".join(f"- {r}" for r in reports) if reports else "(no tasks to process)"
+    )
     return {"final_summary": summary, "blackboard_state": board}
 
 
@@ -156,7 +177,9 @@ def build_swarm_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder.add_edge("worker", "aggregate")
     builder.add_edge("aggregate", END)
 
-    return builder.compile(checkpointer=checkpointer)
+    return ScopedGraph(
+        builder.compile(checkpointer=checkpointer), "swarm", checkpointer
+    )
 
 
 async def build_swarm_graph_with_checkpointer():

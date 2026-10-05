@@ -1,12 +1,17 @@
 import os
 from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END, add_messages
-from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import TASK_TOOLS
 from .checkpointer import get_checkpointer
+from .runtime import (
+    auth_headers,
+    refresh_messages,
+    prompt_messages,
+    ScopedToolNode,
+    ScopedGraph,
+)
 
 
 class AgentState(TypedDict):
@@ -29,14 +34,16 @@ llm_with_tools = llm.bind_tools(TASK_TOOLS)
 async def recall_past_trajectories(state: AgentState):
     import httpx
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
         res = await client.post(
             f"{os.getenv('MEMORY_ENGINE_URL', 'http://memory-engine:8000')}/task/trajectories/search",
             json={
                 "goal_description": state["goal"],
+                "agent_id": state["agent_id"],
                 "min_success_score": 0.7,
             },
         )
+        res.raise_for_status()
         data = res.json()
 
     parts = []
@@ -59,19 +66,9 @@ async def recall_past_trajectories(state: AgentState):
         f"Past Successful Trajectories:\n{trajectories_str}"
     )
 
-    existing = state.get("messages", [])
-    if existing:
-        messages = list(existing)
-        if getattr(messages[0], "type", "") == "system":
-            messages[0] = SystemMessage(content=system_content)
-        else:
-            messages.insert(0, SystemMessage(content=system_content))
-        messages.append(HumanMessage(content=f"Goal: {state['goal']}\nPlan, execute, and store the result."))
-    else:
-        messages = [
-            SystemMessage(content=system_content),
-            HumanMessage(content=f"Goal: {state['goal']}\nPlan, execute, and store the result."),
-        ]
+    messages = refresh_messages(
+        system_content, state.get("messages", []), state["goal"]
+    )
 
     return {
         "past_trajectories": trajectories_str,
@@ -80,7 +77,7 @@ async def recall_past_trajectories(state: AgentState):
 
 
 async def agent_node(state: AgentState):
-    response = await llm_with_tools.ainvoke(state["messages"])
+    response = await llm_with_tools.ainvoke(prompt_messages(state["messages"]))
     return {"messages": [response]}
 
 
@@ -95,14 +92,16 @@ def build_task_graph(checkpointer: BaseCheckpointSaver | None = None):
     builder = StateGraph(AgentState)
     builder.add_node("recall", recall_past_trajectories)
     builder.add_node("agent", agent_node)
-    builder.add_node("tools", ToolNode(TASK_TOOLS))
+    builder.add_node("tools", ScopedToolNode(TASK_TOOLS))
 
     builder.set_entry_point("recall")
     builder.add_edge("recall", "agent")
-    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    builder.add_conditional_edges(
+        "agent", should_continue, {"tools": "tools", END: END}
+    )
     builder.add_edge("tools", "agent")
 
-    return builder.compile(checkpointer=checkpointer)
+    return ScopedGraph(builder.compile(checkpointer=checkpointer), "task", checkpointer)
 
 
 async def build_task_graph_with_checkpointer():

@@ -3,3 +3,8 @@ __pycache__/
 *.py[cod]
 .venv/
 traces/
+.pytest_cache/
+tests/.engine-test.log
+.env.auth
+.venv-engine/
+.venv-tests/

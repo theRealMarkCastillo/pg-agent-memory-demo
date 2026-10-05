@@ -3,7 +3,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-SET hnsw.iterative_scan = strict_order;
+-- Runtime connection settings and versioned upgrades are applied by memory_engine/db.py.
 
 -- ============================================================================
 -- 1. DEVELOPER & CODING AGENT (Workspace Memory)
