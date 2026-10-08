@@ -1,0 +1,54 @@
+[44] tool send_message call: {"target":"agent_security_review","message":"REDACTED"}
+
+[45] assistant: Agent message from /root/tests_design_review:
+Message Type: FINAL_ANSWER
+Task name: /root
+Sender: /root/tests_design_review
+Payload:
+Read-only review complete. I ran isolated Python probes using fake clients; no API calls or shared-data writes.
+
+1. **[P2] Replay can overwrite newer facts with older turns.**  
+   `tools/replay_traces.py:249–257` extracts and persists all turns concurrently. A slow earlier turn may finish after a later correction, making the earlier value current. A fake extractor with a delay on the first turn produced persistence order `['new', 'old']`. Extract concurrently if needed, then persist in conversation order; preserve source timestamps across traces too.
+
+2. **[P2] Trace parsing attributes a final user message to the companion.**  
+   `tools/parse_traces.py:87–88` replaces the previous assistant response with an unmatched trailing user message. Reproduced:
+   ```
+   User: I live in Seattle.
+   Companion: Nice city.
+   User: I just moved to Austin.
+   ```
+   Result:
+   ```
+   Turn(user='I live in Seattle.', assistant='I just moved to Austin.')
+   ```
+   This corrupts extraction scope: the user's correction can become a companion self-fact. Preserve the final user turn explicitly.
+
+3. **[P2] The benchmark accepts contradictory and wrong-subject facts as correct.**  
+   `tools/benchmark_extraction.py:104–125` uses substring/token overlap and predicate substring matching; `281–284` merges subjects before matching. Confirmed:
+   - `LIKES coffee` matches `DISLIKES coffee`.
+   - User `LIVES_IN York` matches self `LIVES_IN New York`.
+   
+   The evaluation therefore cannot substantiate semantic correctness or three-subject isolation. Match canonical predicate and subject exactly, and use explicit entity aliases instead of arbitrary substring overlap.
+
+4. **[P2] Precision/recall scoring is not one-to-one.**  
+   `tools/benchmark_extraction.py:286–295` awards a true positive for every matching prediction, allowing multiple predictions to claim the same label. `matched_prod` stores prediction identities and is never consulted. Five variants matching one label plus one missed label yields reported recall `5/6`, although only one of two labels was recovered. Track matched label indices or use one-to-one assignment; calculate per-trace scores from local counters too (`296–302` currently reports cumulative scores under each trace).
+
+5. **[P2] Replay facts lose provenance.**  
+   `tools/replay_traces.py:158–199` stores facts before creating the episode and never sends `source_episode_id`. My fake-client probe confirmed that every fact omitted it. Consequently, replayed memories cannot support the advertised “where was this learned?” lookup. Create the episode first and attach its returned ID, consistent with the live agent.
+
+6. **[P2] The enabled LLM regression is guaranteed to fail.**  
+   `tests/test_synthetic.py:131–135` reads `data.get("new_facts", [])`, while `benchmark_extraction.extract_turn` returns `user_facts`, `self_facts`, and `shared_facts`. When credentials enable the test, `our_facts` is always empty regardless of extraction quality. Its usual skipped state conceals this.
+
+Design/evidence limits:
+
+- `eval_recall.py:62–76` only prints three returned facts. It has no expected answers, retrieval metrics, or pass/fail threshold, so it is an inspection tool rather than a recall evaluation.
+- `tests/test_agent_evals.py:109–112` allows zero successful claims; `74–77` allows empty enterprise results and defaults a missing `allowed_role` to the requested role. These assertions do not prove the advertised concurrency and isolation behavior.
+- Extraction benchmarks use a separate extraction prompt and production model outputs as reference labels. Those scores need to be described as extractor agreement unless labels are independently checked; they do not measure stored-memory retrieval or downstream answer quality.
+
+Execution prerequisites and constraints:
+
+- The full suite requires a running engine, PostgreSQL, and working embeddings. `tests/conftest.py:15–19` performs a health request for **every test**, including the otherwise offline synthetic tests.
+- Test fixtures use fixed IDs, accumulate rows, and do not clean up. Run integration tests against disposable data, not the user's populated stack.
+- The optional LLM test requires `LLM_BASE_URL` and `LLM_API_KEY` in the process environment.
+- README `259–263` labels the synthetic workflow “no API,” but its benchmark invokes the LLM.
+- `make down` and therefore successful `make ci` remove the database volume (`Makefile:9–10, 32`).
