@@ -1,0 +1,29 @@
+<recommended_plugins>
+Here is a list of plugins that are available but not installed.
+
+- Dropbox (app-69b31dc2110c8191b8b47dc98fe5a052@openai-curated-remote)
+- Box (box@openai-curated-remote)
+- Codex Security (codex-security@openai-curated-remote)
+- Figma (figma@openai-curated-remote)
+- Finances (finances@openai-curated-remote)
+- GitHub (github@openai-curated-remote)
+- Gmail (gmail@openai-curated-remote)
+- Google Calendar (google-calendar@openai-curated-remote)
+- Google Drive (google-drive@openai-curated-remote)
+- Linear (linear@openai-curated-remote)
+- Notion (notion@openai-curated-remote)
+- OpenAI Developers (openai-developers@openai-curated-remote)
+- Outlook Calendar (outlook-calendar@openai-curated-remote)
+- Outlook Email (outlook-email@openai-curated-remote)
+- SharePoint (sharepoint@openai-curated-remote)
+- Slack (slack@openai-curated-remote)
+- Teams (teams@openai-curated-remote)
+</recommended_plugins>
+
+<environment_context>
+  <cwd>/Users/markcastillo/git/pg-agent-memory-demo</cwd>
+  <shell>zsh</shell>
+  <current_date>2026-09-22</current_date>
+  <timezone>America/Los_Angeles</timezone>
+  <filesystem><workspace_roots><root>/Users/markcastillo/git/pg-agent-memory-demo</root><root>/Users/markcastillo/.codex/visualizations/2026/09/22/01a0cb07-14e0-78e2-8909-0861a7316596</root></workspace_roots><permission_profile type="managed"><file_system type="restricted"><entry access="read"><special>:root</special></entry><entry access="write"><path>/Users/markcastillo/git/pg-agent-memory-demo</path></entry><entry access="write"><path>/Users/markcastillo/.codex/visualizations/2026/09/22/01a0cb07-14e0-78e2-8909-0861a7316596</path></entry><entry access="write"><special>:slash_tmp</special></entry><entry access="write"><special>:tmpdir</special></entry><entry access="read"><path>/Users/markcastillo/git/pg-agent-memory-demo/.git</path></entry><entry access="read"><path>/Users/markcastillo/.codex/visualizations/2026/09/22/01a0cb07-14e0-78e2-8909-0861a7316596/.git</path></entry><entry access="read"><path>/Users/markcastillo/git/pg-agent-memory-demo/.agents</path></entry><entry access="read"><path>/Users/markcastillo/.codex/visualizations/2026/09/22/01a0cb07-14e0-78e2-8909-0861a7316596/.agents</path></entry><entry access="read"><path>/Users/markcastillo/git/pg-agent-memory-demo/.codex</path></entry><entry access="read"><path>/Users/markcastillo/.codex/visualizations/2026/09/22/01a0cb07-14e0-78e2-8909-0861a7316596/.codex</path></entry></file_system></permission_profile></filesystem>
+</environment_context>
