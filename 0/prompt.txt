@@ -1,0 +1,1 @@
+what were the key things to note about memory architecture? something about indexing and retrievel?
