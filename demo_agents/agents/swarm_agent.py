@@ -4,7 +4,7 @@ import operator
 from typing import TypedDict, Annotated
 import httpx
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END, add_messages
 from langgraph.types import Send
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -85,19 +85,32 @@ def assign_tasks(state: SwarmState):
 
 async def worker_node(state: SwarmState):
     """A specialist worker: claim its assigned task, execute it, and report back."""
-    task = state["worker_task"]
+    task = state.get("worker_task") or {}
+    task_id = task.get("task_id")
+    task_name = task.get("task_name", "next_available_task")
     agent_name = state.get("agent_name", "worker-bot")
     workflow_id = state["workflow_id"]
+
+    if task_id:
+        assignment_block = (
+            f"Your assigned task: {task_name} (id: {task_id})\n"
+            f"Payload: {task.get('payload', {})}\n\n"
+            "Do the following, in order:\n"
+            "1. Claim YOUR task with claim_task, using the exact task_id above.\n"
+        )
+    else:
+        assignment_block = (
+            "No specific task_id was pre-assigned.\n\n"
+            "Do the following, in order:\n"
+            "1. Claim the next pending task in the workflow using claim_next_task.\n"
+        )
 
     system_content = (
         "You are a specialist worker in a multi-agent swarm. A supervisor has fanned "
         "work out to you in parallel, and other workers are handling their own tasks.\n"
         f"Your name: {agent_name}\n"
         f"Workflow: {workflow_id}\n"
-        f"Your assigned task: {task['task_name']} (id: {task['task_id']})\n"
-        f"Payload: {task['payload']}\n\n"
-        "Do the following, in order:\n"
-        "1. Claim YOUR task with claim_task, using the exact task_id above.\n"
+        f"{assignment_block}"
         "2. Execute the task using execute_shell_command or fetch_url as appropriate.\n"
         "3. Mark it complete with complete_swarm_task and a concise result summary.\n"
         "4. End with a one-line report of what you did.\n"
@@ -105,7 +118,7 @@ async def worker_node(state: SwarmState):
     )
     messages = [
         SystemMessage(content=system_content),
-        HumanMessage(content=f"Process task '{task['task_name']}' now."),
+        HumanMessage(content=f"Process task '{task_name}' now."),
     ]
 
     for _ in range(8):
@@ -121,8 +134,13 @@ async def worker_node(state: SwarmState):
                 try:
                     args = bound_args(state, tc["args"])
                     if tc["name"] == "claim_next_task":
-                        raise ValueError("Workers must claim their assigned task")
-                    if tc["name"] in ("claim_task", "complete_swarm_task"):
+                        if task.get("task_id"):
+                            raise ValueError("Workers must claim their assigned task")
+                        args["workflow_id"] = workflow_id
+                        args["agent_name"] = agent_name
+                    if tc["name"] in ("claim_task", "complete_swarm_task") and task.get(
+                        "task_id"
+                    ):
                         args["task_id"] = task["task_id"]
                     result = await tool.ainvoke(args)
                 except Exception as e:
@@ -141,9 +159,10 @@ async def worker_node(state: SwarmState):
             report = m.content
             break
 
+    summary_line = f"[{agent_name}] {task.get('task_name', 'task')}: {report}"
     return {
-        "reports": [f"[{agent_name}] {task['task_name']}: {report}"],
-        "messages": messages,
+        "reports": [summary_line],
+        "messages": [AIMessage(content=summary_line)],
     }
 
 

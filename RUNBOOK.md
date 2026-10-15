@@ -117,7 +117,7 @@ postgres:
 
 ## Schema Reference
 
-All tables are created by `postgres/init.sql` at first launch. Tables per pattern:
+All tables are created by `postgres/init.sql` at first launch (with idempotent upgrade migrations in `memory_engine/migrations/`). Tables per pattern:
 
 | Pattern | Tables |
 |---------|--------|
@@ -126,16 +126,18 @@ All tables are created by `postgres/init.sql` at first launch. Tables per patter
 | Enterprise | `enterprise_documents` |
 | Tutor | `tutor_skills`, `tutor_user_progress` |
 | Swarm | `swarm_blackboard` |
-| Companion | `companion_episodes`, `companion_chunks`, `companion_graph_nodes`, `companion_graph_edges`, `companion_ephemerals` |
+| Companion | `companion_memory_state`, `companion_episodes`, `companion_chunks`, `companion_graph_nodes`, `companion_graph_edges`, `companion_fact_sources`, `companion_ephemerals` |
 | Checkpointer | `checkpoints`, `checkpoint_writes`, `checkpoint_blobs` |
 
 Companion graph columns:
 
 | Table | Key Columns | Notes |
 |-------|-------------|-------|
-| `companion_graph_nodes` | `user_id`, `name`, `entity_type`, `salience`, `normalize_name_key`, `subject` | `subject` ∈ `user`/`self`/`shared`; unique on `(user_id, name, entity_type, subject)` |
-| `companion_graph_edges` | `user_id`, `source_node_id`, `target_node_id`, `relationship_type`, `status`, `valid_until`, `subject`, `valence`, `intensity`, `source_episode_id` | `valence` −1…1, `intensity` 0…1; `source_episode_id` = provenance link |
-| `companion_episodes` | `episode_id`, `user_id`, `content` | Linked from edges for provenance |
+| `companion_memory_state` | `user_id`, `enabled`, `generation` | Controls right-to-forget fencing and explicit opt-in resume |
+| `companion_graph_nodes` | `user_id`, `name`, `entity_type`, `salience`, `normalize_name_key`, `subject`, `embedding`, `is_subject` | `subject` ∈ `user`/`self`/`shared`; unique on `(user_id, normalize_name_key, subject)` |
+| `companion_graph_edges` | `user_id`, `source_node_id`, `target_node_id`, `relationship_type`, `status`, `valid_from`, `valid_until`, `recorded_at`, `subject`, `valence`, `intensity`, `source_episode_id`, `embedding` | `valence` −1…1, `intensity` 0…1; partial unique index on active edges |
+| `companion_fact_sources` | `edge_id`, `user_id`, `episode_id` | Multi-episode provenance join table |
+| `companion_episodes` | `episode_id`, `user_id`, `content`, `ingestion_id` | Idempotent episode ingestion linked from edges for provenance |
 
 ## Ports Reference
 

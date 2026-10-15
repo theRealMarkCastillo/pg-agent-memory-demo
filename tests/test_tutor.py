@@ -76,3 +76,22 @@ async def test_decay_after_delay(client):
     later = (await get(client, f"/tutor/gaps/{USER_ID}"))
     py_later = next(r["decayed_score"] for r in later if r["skill_name"] == "python_basics")
     assert py_later <= py_initial, f"Score should decay: {py_initial} -> {py_later}"
+
+
+@pytest.mark.asyncio
+async def test_ebbinghaus_decay_over_days(client):
+    """A high score reviewed 15 days ago should decay below 0.5 and become a gap."""
+    await post(
+        client,
+        "/tutor/progress",
+        user_id=USER_ID,
+        skill_name="python_basics",
+        proficiency_score=0.85,
+        days_ago=15,
+    )
+    data = await get(client, f"/tutor/gaps/{USER_ID}")
+    py = next(r for r in data if r["skill_name"] == "python_basics")
+    expected = 0.85 * (0.95**15)
+    assert py["decayed_score"] == pytest.approx(expected, rel=1e-3)
+    assert py["status"] == "gap"
+

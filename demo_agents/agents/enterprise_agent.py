@@ -69,7 +69,32 @@ async def search_policy_docs(state: AgentState):
 
 
 async def agent_node(state: AgentState):
-    if not state.get("retrieved_docs"):
+    messages = state.get("messages", [])
+    # Check whether a tool has already returned policy results or stored a document in this turn
+    turn_has_tool_output = False
+    for m in reversed(messages):
+        if getattr(m, "type", "") == "human":
+            break
+        if getattr(m, "type", "") == "tool" and "No authorized documents found" not in str(m.content):
+            turn_has_tool_output = True
+            break
+
+    try:
+        response = await llm_with_tools.ainvoke(prompt_messages(messages))
+    except Exception:
+        if not state.get("retrieved_docs") and not turn_has_tool_output:
+            return {
+                "messages": [
+                    AIMessage(
+                        content="No current authorized policy matches this query. Please clarify the policy you need."
+                    )
+                ]
+            }
+        raise
+
+    if getattr(response, "tool_calls", None):
+        return {"messages": [response]}
+    if not state.get("retrieved_docs") and not turn_has_tool_output:
         return {
             "messages": [
                 AIMessage(
@@ -77,7 +102,6 @@ async def agent_node(state: AgentState):
                 )
             ]
         }
-    response = await llm_with_tools.ainvoke(prompt_messages(state["messages"]))
     return {"messages": [response]}
 
 

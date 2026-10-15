@@ -54,7 +54,7 @@ Each pattern addresses a distinct agent archetype with different memory requirem
 
 | # | Archetype | Memory Type | PostgreSQL Primitive | Retrieval Algorithm | Cognitive Function |
 |---|-----------|------------|---------------------|-------------------|-------------------|
-| 1 | **Developer Assistant** | Symbolic Code Memory | halfvec HNSW + pg_trgm GIN | Cosine ANN + trigram hybrid | Semantic recall + pattern matching |
+| 1 | **Developer Assistant** | Symbolic Code Memory | halfvec HNSW + pg_trgm GIN | RRF (Cosine ANN + trigram) | Semantic recall + pattern matching |
 | 2 | **Autonomous Task Agent** | Episodic Trajectory Memory | halfvec HNSW + REAL filter | Similarity search with success gate | Experience-based planning |
 | 3 | **Enterprise Knowledge Agent** | Policy & Audit Memory | halfvec HNSW + tsvector GIN | Reciprocal Rank Fusion (RRF) | Role-gated knowledge retrieval |
 | 4 | **Adaptive Tutor** | Skill Tree Memory | CTE + decay function | Forgetting-curve gap analysis | Spaced repetition modeling |
@@ -151,7 +151,7 @@ For testing the companion memory with real or synthetic data, see the **`tools/`
 ├── GUIDE.md                    # Educational deep-dive & taxonomy
 ├── RUNBOOK.md                  # Operations & troubleshooting
 ├── postgres/
-│   └── init.sql                # 14 tables (11 pattern + 3 checkpointer), HNSW + GIN indexes
+│   └── init.sql                # 16 tables (13 pattern + 3 checkpointer), HNSW + GIN indexes
 ├── memory_engine/
 │   ├── Dockerfile
 │   ├── main.py                 # FastAPI application

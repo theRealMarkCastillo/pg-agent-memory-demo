@@ -184,7 +184,7 @@ def store_policy_document(doc_title: str, allowed_role: str, content: str) -> st
 @tool
 def get_skill_gaps(user_id: str) -> str:
     """Get the current skill gaps for a learner, including decayed proficiency
-    scores based on the Ebbinghaus forgetting curve."""
+    scores based on the Ebbinghaus forgetting curve and prerequisite readiness."""
     results = _get(f"/tutor/gaps/{user_id}")
     if not results:
         return "No skills found for this user."
@@ -193,7 +193,9 @@ def get_skill_gaps(user_id: str) -> str:
         lines.append(
             f"Skill: {s['skill_name']} | "
             f"Decayed Score: {s['decayed_score']:.3f} | "
-            f"Status: {s['status']}"
+            f"Status: {s['status']} | "
+            f"Ready: {s.get('ready')} | "
+            f"Prerequisite: {s.get('prerequisite')}"
         )
     return "\n".join(lines)
 
@@ -298,27 +300,37 @@ def complete_swarm_task(
 
 @tool
 def get_companion_context(user_id: str, query: str | None = None) -> str:
-    """Get the persistent memory context for a user, including relationship
-    graph facts and current ephemeral state. Optionally pass a query to rank
-    facts by relevance to that query."""
+    """Get the persistent 3-subject memory context for a user (user facts, companion
+    self-model facts, shared relationship facts, and active TTL ephemerals).
+    Optionally pass a query to rank facts by relevance to that query."""
     params = {"user_id": user_id}
     if query:
         params["query"] = query
     results = _get("/companion/context", params=params)
-    facts = results.get("graph_facts", [])
+    user_facts = results.get("graph_facts", [])
+    self_facts = results.get("self_facts", [])
+    shared_facts = results.get("shared_facts", [])
     ephs = results.get("ephemerals", [])
 
-    facts_str = "; ".join(
-        f"{f['name']} ({f['entity_type']})"
-        + (
-            f" {f['relationship_type']} {f['related_to']}"
-            if f.get("related_to")
-            else ""
-        )
-        for f in facts
+    def _fmt(facts: list) -> str:
+        return "; ".join(
+            f"{f['name']} ({f['entity_type']})"
+            + (
+                f" {f['relationship_type']} {f['related_to']}"
+                if f.get("related_to")
+                else ""
+            )
+            + f" [valence={f.get('valence', 0.0)}, intensity={f.get('intensity', 0.5)}]"
+            for f in facts
+        ) or "(none)"
+
+    ephs_str = "; ".join(e["description"] for e in ephs) or "(none)"
+    return (
+        f"User Facts: {_fmt(user_facts)}\n"
+        f"Self Facts: {_fmt(self_facts)}\n"
+        f"Shared Facts: {_fmt(shared_facts)}\n"
+        f"Current Mood/Events: {ephs_str}"
     )
-    ephs_str = "; ".join(e["description"] for e in ephs)
-    return f"Active Facts: {facts_str}\nCurrent Mood/Events: {ephs_str}"
 
 
 @tool
@@ -356,18 +368,25 @@ def store_companion_fact(
     entity_type: str,
     relationship_to: str | None = None,
     relationship_type: str | None = None,
+    subject: str = "user",
+    valence: float = 0.0,
+    intensity: float = 0.5,
 ) -> str:
-    """Store a fact about the user in the relationship graph (e.g., preferences, goals, people)."""
+    """Store a fact in the companion relationship graph (subject='user', 'self', or 'shared')
+    with optional emotional valence (-1..1) and intensity (0..1)."""
     body = {
         "user_id": user_id,
         "name": name,
         "entity_type": entity_type,
+        "subject": subject,
+        "valence": valence,
+        "intensity": intensity,
     }
     if relationship_to and relationship_type:
         body["relationship_to"] = relationship_to
         body["relationship_type"] = relationship_type
     _post("/companion/facts", body=body)
-    return f"Fact stored: {name} ({entity_type})."
+    return f"Fact stored: {name} ({entity_type}, subject={subject})."
 
 
 @tool
@@ -392,10 +411,11 @@ def terminate_companion_relationship(
     name: str,
     relationship_to: str | None = None,
     relationship_type: str | None = None,
+    subject: str = "user",
 ) -> str:
     """Terminate a relationship in the companion's memory graph when a fact is no
     longer true (e.g., the user moved away, changed jobs, or ended a goal)."""
-    body = {"user_id": user_id, "name": name}
+    body = {"user_id": user_id, "name": name, "subject": subject}
     if relationship_to and relationship_type:
         body["relationship_to"] = relationship_to
         body["relationship_type"] = relationship_type

@@ -73,7 +73,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent_password}
       POSTGRES_DB: ${POSTGRES_DB:-agent_memory_db}
       WORKSPACE_DIR: /tmp/agent-workspace
-      HTTP_ALLOWED_HOSTS: ${HTTP_ALLOWED_HOSTS:-}
+      HTTP_ALLOWED_HOSTS: ${HTTP_ALLOWED_HOSTS:-httpbin.org}
     depends_on:
       - memory-engine
     networks:

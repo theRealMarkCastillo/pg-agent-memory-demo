@@ -278,6 +278,10 @@ async def test_swarm_graph_persists_parallel_claims(client, agents, monkeypatch)
             {"workflow_id": "workflow"}, {"configurable": {"thread_id": "parallel"}}
         )
         assert len(result["reports"]) == 2
+        assert not any(
+            getattr(m, "type", "") in ("system", "tool")
+            for m in result.get("messages", [])
+        )
         assert all(
             t["status"] == "COMPLETED"
             for t in await get(client, "/swarm/tasks/workflow")
@@ -286,3 +290,136 @@ async def test_swarm_graph_persists_parallel_claims(client, agents, monkeypatch)
         await cp._pool_instance.close()
         await cp._guard_pool_instance.close()
         cp._checkpointer_instance = None
+
+
+async def test_enterprise_allows_tool_call_when_initial_search_empty(
+    client, agents, monkeypatch
+):
+    model = ScriptedModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "store-1",
+                        "name": "store_policy_document",
+                        "args": {
+                            "doc_title": "Expense Policy",
+                            "allowed_role": "employee",
+                            "content": "Meals up to $50 are reimbursable.",
+                        },
+                    }
+                ],
+            ),
+            AIMessage(content="Stored Expense Policy."),
+        ]
+    )
+    monkeypatch.setattr(agents.enterprise, "llm_with_tools", model)
+    result = await agents.enterprise.build_enterprise_graph().ainvoke(
+        {"query": "Please store a new expense policy", "user_role": "employee"}
+    )
+    assert result["messages"][-1].content == "Stored Expense Policy."
+    docs = await post(
+        client,
+        "/enterprise/documents/search",
+        query="reimbursable meals",
+        user_role="employee",
+    )
+    assert any(d["doc_title"] == "Expense Policy" for d in docs)
+
+
+async def test_swarm_worker_pull_mode_claims_next_task(client, agents, monkeypatch):
+    import re
+    from agents import swarm_agent
+
+    await post(
+        client,
+        "/swarm/tasks",
+        workflow_id="pull-wf",
+        task_name="summarize_text",
+        payload={"text": "hello"},
+    )
+
+    class PullWorkerModel:
+        async def ainvoke(self, messages):
+            results = [m for m in messages if m.type == "tool"]
+            if not results:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "claim-next",
+                            "name": "claim_next_task",
+                            "args": {
+                                "agent_name": "summary-bot",
+                                "workflow_id": "pull-wf",
+                            },
+                        }
+                    ],
+                )
+            if len(results) == 1:
+                task_id = re.search(r"\(ID: ([^)]+)\)", results[0].content).group(1)
+                lease = re.search(r"Lease token: (\S+)", results[0].content).group(1)
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "complete",
+                            "name": "complete_swarm_task",
+                            "args": {
+                                "task_id": task_id,
+                                "agent_name": "summary-bot",
+                                "lease_token": lease,
+                                "result_summary": "pulled and completed",
+                            },
+                        }
+                    ],
+                )
+            return AIMessage(content="pulled and completed")
+
+    monkeypatch.setattr(swarm_agent, "llm_with_tools", PullWorkerModel())
+    out = await swarm_agent.worker_node(
+        {
+            "workflow_id": "pull-wf",
+            "worker_task": {},
+            "agent_name": "summary-bot",
+        }
+    )
+    assert len(out["messages"]) == 1
+    assert "pulled and completed" in out["reports"][0]
+    tasks = await get(client, "/swarm/tasks/pull-wf")
+    assert len(tasks) == 1 and tasks[0]["status"] == "COMPLETED"
+
+
+async def test_demo_seed_data_populates_canonical_patterns(client, agents, monkeypatch):
+    import main as demo_main
+
+    monkeypatch.setattr(demo_main, "MEMORY_ENGINE_URL", str(client.base_url).rstrip("/"))
+    await demo_main.seed_data(client)
+
+    # Pattern 2: High-score trajectory recalled, low-score (0.20) excluded by quality gate
+    trajs = await post(
+        client,
+        "/task/trajectories/search",
+        goal_description="Write a Python script to count words",
+        agent_id="task-bot-2",
+        min_success_score=0.7,
+    )
+    assert trajs and all(t["success_score"] >= 0.7 for t in trajs)
+
+    # Pattern 4: Ebbinghaus decay turns 15-day-old 0.85 mastery into a gap (<0.7)
+    gaps = {
+        g["skill_name"]: g
+        for g in await get(client, "/tutor/gaps/learner_001")
+    }
+    assert gaps["python_basics"]["status"] == "mastered"
+    assert gaps["database_design"]["status"] == "gap"
+    assert gaps["database_design"]["decayed_score"] < 0.45
+
+    # Pattern 6: Canonical subject-first edges + common ground between user and Iris
+    ctx = await get(client, "/companion/context", user_id="usr_anthony")
+    common = agents.companion._find_common_ground(
+        ctx["graph_facts"], ctx["self_facts"]
+    )
+    assert "long conversations" in common
+

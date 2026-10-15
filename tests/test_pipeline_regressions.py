@@ -81,3 +81,18 @@ async def test_replay_commits_source_order_with_provenance(monkeypatch):
     facts = [data for path, data in stored if path == "/companion/facts"]
     assert [f["relationship_to"] for f in facts] == ["old", "new"]
     assert [f["source_episode_id"] for f in facts] == ["ep-1", "ep-3"]
+
+
+def test_shared_companion_extraction_prompt_and_parser():
+    import benchmark_extraction
+    from companion_extraction import build_extraction_prompt, parse_extraction_response
+
+    assert replay_traces.build_extraction_prompt is build_extraction_prompt
+    assert benchmark_extraction.build_extraction_prompt is build_extraction_prompt
+    parsed = parse_extraction_response(
+        '```json\n{"user_facts": [{"name": "user", "relationship_to": "NYC", "relationship_type": "LIVES_IN"}]}\n```'
+    )
+    assert parsed["user_facts"][0]["relationship_to"] == "NYC"
+    assert parsed["self_facts"] == []
+    assert parsed["shared_facts"] == []
+

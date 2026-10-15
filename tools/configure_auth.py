@@ -27,6 +27,7 @@ def main():
             "task:read",
             "task:write",
             "enterprise:read",
+            "enterprise:write",
             "tutor:read",
             "tutor:write",
             "swarm:read",

@@ -75,9 +75,9 @@ A coding assistant that understands a codebase at the symbol level — functions
 
 **Storage**: The `dev_code_symbols` table stores each code symbol as a row with project/git-branch metadata, a human-readable signature, and the symbol's semantic description encoded as a `halfvec(1536)` embedding.
 
-**Retrieval Strategy**: Hybrid search combining:
-- **Cosine distance** via HNSW index on the `embedding` halfvec column (semantic similarity)
-- **Trigram similarity** via GIN index on `symbol_name` (fuzzy name matching for typos like "recal" → "recall_similar")
+**Retrieval Strategy**: Hybrid search fused via Reciprocal Rank Fusion (RRF, `k=60`) over `MATERIALIZED` CTEs combining:
+- **Cosine distance** via HNSW index on the `embedding` halfvec column (semantic similarity, gated by `distance <= 0.8`)
+- **Trigram + prefix similarity** via GIN index on `symbol_name` (`symbol_name % $5 OR symbol_name ILIKE $5 || '%'` for fuzzy identifier matching like `"recal"` → `"recall_similar"`)
 
 **Filtering**: Project + branch isolation ensures the agent doesn't cross-contaminate between different git repositories or feature branches.
 
@@ -367,13 +367,13 @@ No latency benchmark is established by this demo. Measure query plans, filtered 
 
 | Dimension | Developer | Task | Enterprise | Tutor | Swarm | Companion |
 |-----------|-----------|------|------------|-------|-------|-----------|
-| Storage tables | 1 | 1 | 1 | 2 | 1 | 5 |
-| Indexes | 2 (HNSW + GIN) | 1 (HNSW) | 2 (HNSW + GIN) | 0 | 0 | 1 (HNSW) |
+| Storage tables | 1 | 1 | 1 | 2 | 1 | 7 |
+| Indexes | 3 (HNSW + GIN + B-tree) | 1 (HNSW) | 3 (HNSW + GIN + unique) | 0 | 1 (B-tree) | 7 (3 HNSW + 4 B-tree) |
 | Query complexity | Medium | Simple | High | Medium | Medium | High |
-| Agent graph nodes | 3 | 3 | 3 | 3 | 3 | 3 |
-| Tools available | 5 | 6 | 2 | 2 | 5 | 5 |
+| Agent graph nodes | 3 | 3 | 3 | 3 | 3 | 4 |
+| Tools available | 5 | 6 | 2 | 2 | 6 | 7 |
 | State transitions | Read + Write | Read + Write | Read + Write | Read + Write | Read + Write | Read + Write |
-| Multi-agent capable | — | — | — | — | Yes (DB level) | — |
+| Multi-agent capable | — | — | — | — | Yes (Send + DB level) | — |
 | Real execution | Shell, file | Shell, HTTP, file | — | — | Shell, HTTP | — |
 
 ### When to Use Which Pattern

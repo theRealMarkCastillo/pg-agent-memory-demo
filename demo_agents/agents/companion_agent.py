@@ -6,6 +6,7 @@ from langgraph.graph import StateGraph, END, add_messages
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import COMPANION_TOOLS
 from .checkpointer import get_checkpointer
+from .companion_extraction import build_extraction_prompt, parse_extraction_response
 from .runtime import (
     auth_headers,
     refresh_messages,
@@ -207,56 +208,11 @@ async def extract_memory(state: AgentState):
     user_msg = state.get("user_message", "")
     agent_msg = _last_assistant_content(state.get("messages", []))
 
-    prompt = f"""Analyze this conversation between a user and an AI companion. Extract durable,
-identity-relevant memories. Capture facts about the USER, facts the COMPANION reveals about
-ITSELF (its own preferences, history, values, how it's changing), and SHARED relationship
-facts (inside jokes, shared rituals, milestones, what "we/us/our" — the growing bond).
-
-User said: {user_msg}
-Companion said: {agent_msg}
-
-Return ONLY valid JSON with this exact shape:
-{{
-  "user_facts": [
-    {{"name": "<entity>", "entity_type": "<type>", "relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", "valence": <number -1..1>, "intensity": <number 0..1>}}
-  ],
-  "self_facts": [
-    {{"name": "<companion entity>", "entity_type": "<type>", "relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", "valence": <number -1..1>, "intensity": <number 0..1>}}
-  ],
-  "shared_facts": [
-    {{"name": "<entity>", "entity_type": "<type>", "relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", "valence": <number -1..1>, "intensity": <number 0..1>}}
-  ],
-  "terminated_edges": [
-    {{"name": "<entity>", "relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>"}}
-  ],
-  "episode_content": "<1-2 sentence summary of the exchange>"
-}}
-
-Rules:
-- user_facts: durable facts the USER revealed (preferences, people, locations, goals, pets, jobs, hobbies, health, relationships). These are about the user.
-- self_facts: durable facts the COMPANION revealed about ITSELF — its own stated preferences, history, values, how it feels or is changing. Only extract these if the companion says something concrete about itself (NOT the user). Prefer the companion's name (e.g. "Vesper") as name.
-- shared_facts: relationship facts that belong to BOTH — "we always...", "our inside joke", shared rituals, relationship milestones, agreements. These capture the bond growing together.
-- Use entity_type values like: person, location, goal, preference, hobby, job, pet, event, self
-- DIRECTION: name is the SUBJECT, relationship_to is the OBJECT. One canonical direction only; never emit the reverse.
-- CONSISTENCY: reuse stable entity names (the user's name or "user"; the companion's name for self_facts). Never duplicate a fact already stated.
-- VALENCE & INTENSITY: valence reflects the emotional tone of the fact (-1 very sad/loss, +1 joyful). intensity is how strongly felt (0.0..1.0). Examples: pet dying -> valence -0.9, intensity 0.9. new job -> valence +0.6, intensity 0.5. neutral facts -> valence 0, intensity 0.3.
-- PREDICATES: relationship_type MUST be one of: LIVES_IN, FROM, MOVED_TO, GREW_UP_IN, HAS_JOB, WORKS_AT, WORKED_AT, WORKS_ON, MARRIED_TO, DATING, PARENT_OF, SIBLING_OF, FRIEND_OF, FAMILY_MEMBER, HAS_PET, LIKES, LOVES, DISLIKES, HATES, ENJOYS, INTERESTED_IN, PREFERS, ALLERGIC_TO, HAS_CONDITION, DIETARY_RESTRICTION, WATCHES, READS, PLAYS, LISTENS_TO, WRITES, HAS_AGE, BIRTHDAY_ON, SPEAKS, IDENTIFIES_AS, PRACTICES, HAS_NAME, WANTS_TO, PLANS_TO, AVOIDS, SKILLED_AT, CERTIFIED_IN, VALUES, USES, SUPPORTS, TRUSTS, APPRECIATES, BUILT, MISSES, SHARED_EXPERIENCE, SHARED_INTEREST, SHARED_RITUAL, INSIDE_JOKE, AGREED_ON, SHARED_MEMORY, RELATIONSHIP_MILESTONE, DISAGREE_ON, HAS_FACT
-- terminated_edges: relationships that are NO LONGER true (user or companion moved on, dropped a goal, ended a fact)
-- If nothing meaningful in a category, return an empty list for it.
-"""
-
+    prompt = build_extraction_prompt(user_msg, agent_msg)
     try:
         response = await extraction_llm.ainvoke(prompt)
-        content = response.content or ""
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.strip("`")
-            if content.startswith("json"):
-                content = content[4:]
-        data = json.loads(content)
+        data = parse_extraction_response(response.content or "")
     except Exception:
-        data = {}
-    if not isinstance(data, dict):
         data = {}
 
     async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:

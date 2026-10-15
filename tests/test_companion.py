@@ -11,28 +11,29 @@ async def seed_facts(client):
     await post(client, "/companion/facts",
         user_id=USER, name="Alice", entity_type="person")
     await post(client, "/companion/facts",
-        user_id=USER, name="Brooklyn", entity_type="location",
-        relationship_to="Alice", relationship_type="lives_in")
+        user_id=USER, name="Alice", entity_type="person",
+        relationship_to="Brooklyn", relationship_type="lives_in")
     await post(client, "/companion/facts",
-        user_id=USER, name="Photography", entity_type="hobby",
-        relationship_to="Alice", relationship_type="enjoys")
+        user_id=USER, name="Alice", entity_type="person",
+        relationship_to="Photography", relationship_type="enjoys")
 
 
 @pytest.mark.asyncio
 async def test_graph_facts_retrieved(client):
     data = await get(client, "/companion/context", user_id=USER)
-    names = {f["name"] for f in data["graph_facts"]}
-    assert "Alice" in names
-    assert "Brooklyn" in names
-    assert "Photography" in names
+    subjects = {f["name"] for f in data["graph_facts"]}
+    targets = {f["related_to"] for f in data["graph_facts"] if f.get("related_to")}
+    assert "Alice" in subjects
+    assert "Brooklyn" in targets
+    assert "Photography" in targets
 
 
 @pytest.mark.asyncio
 async def test_relationship_edges_present(client):
     data = await get(client, "/companion/context", user_id=USER)
-    brooklyn = next(f for f in data["graph_facts"] if f["name"] == "Brooklyn")
+    brooklyn = next(f for f in data["graph_facts"] if f.get("related_to") == "Brooklyn")
+    assert brooklyn["name"] == "Alice"
     assert brooklyn["relationship_type"] == "lives_in"
-    assert brooklyn["related_to"] == "Alice"
 
 
 @pytest.mark.asyncio
@@ -95,16 +96,16 @@ async def test_salience_bumps_on_remention(client):
 async def test_terminate_relationship(client):
     user = "terminate_user"
     await post(client, "/companion/facts",
-        user_id=user, name="Brooklyn", entity_type="location",
-        relationship_to="Home", relationship_type="lives_in")
+        user_id=user, name="Alice", entity_type="person",
+        relationship_to="Brooklyn", relationship_type="lives_in")
     await post(client, "/companion/facts/terminate",
-        user_id=user, name="Brooklyn", relationship_to="Home",
+        user_id=user, name="Alice", relationship_to="Brooklyn",
         relationship_type="lives_in")
 
     data = await get(client, "/companion/context", user_id=user)
-    brooklyn = next(f for f in data["graph_facts"] if f["name"] == "Brooklyn")
-    assert brooklyn["related_to"] is None or brooklyn["relationship_type"] is None, \
-        f"Edge not terminated: {brooklyn}"
+    alice = next(f for f in data["graph_facts"] if f["name"] == "Alice")
+    assert alice["related_to"] is None or alice["relationship_type"] is None, \
+        f"Edge not terminated: {alice}"
 
 
 @pytest.mark.asyncio

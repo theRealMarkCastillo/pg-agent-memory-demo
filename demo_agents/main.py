@@ -49,18 +49,44 @@ async def seed_data(client: httpx.AsyncClient):
         },
     )
 
+    # Pattern 2: Seed a high-score trajectory, a low-score failed trajectory (filtered out by >=0.7),
+    # and an API-fetching trajectory matching Demo 2a & 2b.
     await client.post(
         f"{MEMORY_ENGINE_URL}/task/trajectories",
         json={
             "agent_id": "task-bot-2",
-            "goal_description": "Scrape product prices from competitor websites and compile a CSV report",
+            "goal_description": "Write a Python script in /tmp/agent-workspace to analyze text and count words, then verify it",
             "action_sequence": [
-                {"action": "fetch_url", "url": "https://competitor.com/products"},
-                {"action": "parse_prices", "selector": ".price-tag"},
-                {"action": "write_csv", "file": "report.csv"},
+                {"action": "write_file", "path": "/tmp/agent-workspace/word_count.py"},
+                {"action": "execute_shell_command", "command": "python3 /tmp/agent-workspace/word_count.py"},
             ],
-            "execution_result": "Successfully scraped 45 products and generated CSV report with pricing data.",
+            "execution_result": "Wrote word_count.py to workspace and verified output.",
             "success_score": 0.95,
+        },
+    )
+    await client.post(
+        f"{MEMORY_ENGINE_URL}/task/trajectories",
+        json={
+            "agent_id": "task-bot-2",
+            "goal_description": "Write a Python script to count words without testing or saving to workspace",
+            "action_sequence": [
+                {"action": "inline_eval", "note": "unverified snippet failed with SyntaxError"},
+            ],
+            "execution_result": "Failed due to untested syntax error.",
+            "success_score": 0.20,
+        },
+    )
+    await client.post(
+        f"{MEMORY_ENGINE_URL}/task/trajectories",
+        json={
+            "agent_id": "task-bot-2",
+            "goal_description": "Fetch JSON data from an HTTPS endpoint and extract summary titles",
+            "action_sequence": [
+                {"action": "fetch_url", "url": "https://httpbin.org/json"},
+                {"action": "parse_json", "key": "slideshow.slides"},
+            ],
+            "execution_result": "Fetched JSON payload and extracted slide titles.",
+            "success_score": 0.92,
         },
     )
 
@@ -109,6 +135,16 @@ async def seed_data(client: httpx.AsyncClient):
             "proficiency_score": 0.3,
         },
     )
+    # Reviewed 15 days ago at 0.85 -> Ebbinghaus decay (0.85 * 0.95^15 = 0.394) turns it into a gap!
+    await client.post(
+        f"{MEMORY_ENGINE_URL}/tutor/progress",
+        json={
+            "user_id": "learner_001",
+            "skill_name": "database_design",
+            "proficiency_score": 0.85,
+            "days_ago": 15,
+        },
+    )
 
     await client.post(
         f"{MEMORY_ENGINE_URL}/swarm/tasks",
@@ -127,22 +163,35 @@ async def seed_data(client: httpx.AsyncClient):
         },
     )
 
+    # Pattern 6: Canonical subject -> predicate -> object direction (name="user", relationship_to=<object>)
     await client.post(
         f"{MEMORY_ENGINE_URL}/companion/facts",
         json={
             "user_id": "usr_anthony",
-            "name": "Apartment Hunting",
-            "entity_type": "goal",
+            "name": "user",
+            "entity_type": "person",
+            "relationship_to": "Apartment Hunting",
+            "relationship_type": "plans_to",
         },
     )
     await client.post(
         f"{MEMORY_ENGINE_URL}/companion/facts",
         json={
             "user_id": "usr_anthony",
-            "name": "Brooklyn",
-            "entity_type": "location",
-            "relationship_to": "Apartment Hunting",
-            "relationship_type": "target_area",
+            "name": "user",
+            "entity_type": "person",
+            "relationship_to": "Brooklyn",
+            "relationship_type": "lives_in",
+        },
+    )
+    await client.post(
+        f"{MEMORY_ENGINE_URL}/companion/facts",
+        json={
+            "user_id": "usr_anthony",
+            "name": "user",
+            "entity_type": "person",
+            "relationship_to": "long conversations",
+            "relationship_type": "enjoys",
         },
     )
     await client.post(
@@ -337,12 +386,12 @@ async def run_demos():
     print(f"Retrieved Context:\n{result.get('retrieved_context', 'N/A')}")
     print(f"Response:\n{_last_assistant_response(result)}")
 
-    print("\n[Demo 6b] Companion — Multi-turn: remembers previous turn")
+    print("\n[Demo 6b] Companion — Multi-turn: remembers new facts & common ground")
     print("-" * 40)
     result2 = await companion_app.ainvoke(
         {
             "user_id": "usr_anthony",
-            "user_message": "Actually, I found a place in Williamsburg. Can you remember that?",
+            "user_message": "I also started getting into poetry recently — I really enjoy poetry. Can you remember that?",
         },
         config={"configurable": {"thread_id": "comp-demo-1"}},
     )
@@ -354,7 +403,7 @@ async def run_demos():
     result3 = await companion_app.ainvoke(
         {
             "user_id": "usr_anthony",
-            "user_message": "I decided not to move to Brooklyn after all — I'm staying in Manhattan.",
+            "user_message": "I no longer live in Brooklyn — I moved and I live in Manhattan now.",
         },
         config={"configurable": {"thread_id": "comp-demo-1"}},
     )

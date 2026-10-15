@@ -22,7 +22,13 @@ import sys
 from pathlib import Path
 
 from parse_traces import parse_trace_file
-from replay_traces import PREDICATE_VOCAB, _strip_code_fence, get_openai_client
+from replay_traces import (
+    PREDICATE_VOCAB,
+    _strip_code_fence,
+    build_extraction_prompt,
+    get_openai_client,
+    parse_extraction_response,
+)
 
 # production predicates we care about (skip the generic HAS_FACT noise)
 _SKIP_PREDICATES = {"HAS_FACT"}
@@ -164,59 +170,13 @@ def _dedup_facts(facts: list[dict]) -> list[dict]:
 
 
 async def _extract_single(client, model: str, user_msg: str, agent_msg: str) -> dict:
-    """Run the extraction prompt on ONE user/companion turn pair."""
-    prompt = (
-        "Extract durable, identity-relevant facts from this exchange. Capture facts "
-        "about the USER, facts the COMPANION reveals about ITSELF, and SHARED "
-        "relationship facts.\n"
-        "User facts: preferences, people, locations, goals, pets, jobs, hobbies, "
-        "health, relationships. Self facts: what the companion says about itself. "
-        "Shared facts: 'we/our' relationship details.\n\n"
-        f"User: {user_msg}\nCompanion: {agent_msg}\n\n"
-        "Return ONLY valid JSON:\n"
-        '{"user_facts": [{"name": "<entity>", "entity_type": "<type>", '
-        '"relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", '
-        '"valence": <number -1..1>, "intensity": <number 0..1>}],\n'
-        '"self_facts": [{"name": "<companion entity>", "entity_type": "<type>", '
-        '"relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", '
-        '"valence": <number -1..1>, "intensity": <number 0..1>}],\n'
-        '"shared_facts": [{"name": "<entity>", "entity_type": "<type>", '
-        '"relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", '
-        '"valence": <number -1..1>, "intensity": <number 0..1>}],\n'
-        '"terminated_edges": [], "episode_content": ""}\n'
-        "Rules: name=subject entity, relationship_to=object. One canonical direction only. "
-        "Use entity_type: person, location, goal, preference, hobby, job, pet, event, self. "
-        "valence: emotional tone (-1 sad/loss, +1 joyful); intensity: how strongly felt (0..1). "
-        "relationship_type MUST be one of:\n"
-        f"{PREDICATE_VOCAB}\n"
-        'Examples: "I live in Seattle"->LIVES_IN, "I love sushi"->LOVES, '
-        '"I play guitar"->PLAYS, "my wife Sarah"->MARRIED_TO, '
-        '"I have a cat Luna"->HAS_PET, "I want to learn Japanese"->WANTS_TO. '
-        "If nothing meaningful in a category, return an empty list for it."
-    )
+    """Run the canonical companion extraction prompt on ONE user/companion turn pair."""
+    prompt = build_extraction_prompt(user_msg, agent_msg)
     response = await client.chat.completions.create(
         model=model, messages=[{"role": "user", "content": prompt}], temperature=0.0
     )
     content = response.choices[0].message.content or ""
-    try:
-        data = json.loads(_strip_code_fence(content))
-    except Exception:
-        return {}
-    if isinstance(data, list):
-        data = {"user_facts": data}
-    if not isinstance(data, dict):
-        return {}
-    for key in ("user_facts", "self_facts", "shared_facts", "terminated_edges"):
-        if not isinstance(data.get(key), list):
-            data[key] = []
-        data[key] = [x for x in data[key] if isinstance(x, dict)]
-    return {
-        "user_facts": data["user_facts"],
-        "self_facts": data["self_facts"],
-        "shared_facts": data["shared_facts"],
-        "terminated_edges": data["terminated_edges"],
-        "episode_content": "",
-    }
+    return parse_extraction_response(content)
 
 
 async def extract_turn(
