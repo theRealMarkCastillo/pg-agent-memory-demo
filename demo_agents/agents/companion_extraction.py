@@ -18,7 +18,8 @@ PLANS_TO, AVOIDS, SKILLED_AT, CERTIFIED_IN, VALUES, USES, SUPPORTS, TRUSTS,
 APPRECIATES, BUILT, MISSES, SHARED_EXPERIENCE, SHARED_INTEREST, SHARED_RITUAL,
 INSIDE_JOKE, AGREED_ON, SHARED_MEMORY, RELATIONSHIP_MILESTONE, DISAGREE_ON, HAS_FACT"""
 
-EXTRACTION_PROMPT = """Analyze this conversation between a user and an AI companion. Extract durable,
+EXTRACTION_PROMPT = (
+    """Analyze this conversation between a user and an AI companion. Extract durable,
 identity-relevant memories. Capture facts about the USER, facts the COMPANION reveals about
 ITSELF (its own preferences, history, values, how it's changing), and SHARED relationship
 facts (inside jokes, shared rituals, milestones, what "we/us/our" — the growing bond).
@@ -38,7 +39,7 @@ Return ONLY valid JSON with this exact shape:
     {{"name": "<entity>", "entity_type": "<type>", "relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", "valence": <number -1..1>, "intensity": <number 0..1>}}
   ],
   "terminated_edges": [
-    {{"name": "<entity>", "relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>"}}
+    {{"name": "<entity>", "relationship_to": "<target or null>", "relationship_type": "<UPPER_SNAKE_PREDICATE>", "subject": "<user|self|shared>"}}
   ],
   "episode_content": "<1-2 sentence summary of the exchange>"
 }}
@@ -51,13 +52,16 @@ Rules:
 - DIRECTION: name is the SUBJECT, relationship_to is the OBJECT. Express each fact in ONE canonical direction and never emit the reverse. E.g. "user likes Gemini" -> name="user", relationship_to="Gemini", relationship_type="LIKES".
 - CONSISTENCY: reuse stable entity names (the user's name or "user"; the companion's name for self_facts). Never duplicate a fact already stated.
 - PREDICATES: relationship_type MUST be one of these UPPER_SNAKE values:
-""" + PREDICATE_VOCAB + """
+"""
+    + PREDICATE_VOCAB
+    + """
   - Match the verb: "I enjoy hiking" -> ENJOYS. "I love sushi" -> LOVES. "I play guitar" -> PLAYS. "I live in Seattle" -> LIVES_IN. "I'm a software developer" -> HAS_JOB. "My wife Sarah is a nurse" -> MARRIED_TO (relationship_to="Sarah"). "I have a cat named Luna" -> HAS_PET (relationship_to="Luna"). "I want to learn Japanese" -> WANTS_TO (relationship_to="learn Japanese"). "I used to work at Google" -> WORKED_AT. "I hate spiders" -> HATES. "I'm allergic to peanuts" -> ALLERGIC_TO. "I'm vegetarian" -> DIETARY_RESTRICTION.
   - TEMPORAL: extract CURRENT state. Past jobs use WORKED_AT, current use WORKS_AT.
 - VALENCE & INTENSITY: valence reflects emotional tone (-1 very sad/loss, +1 joyful); intensity how strongly felt (0..1). Pet dying -> valence -0.9 intensity 0.9. New job -> +0.6/0.5. Neutral -> 0/0.3.
-- terminated_edges: relationships that are NO LONGER true (user or companion moved on, dropped a goal, ended a fact)
+- terminated_edges: relationships that are NO LONGER true. Always include subject: user for user facts, self for companion facts, shared for relationship facts. Never guess an omitted scope.
 - If nothing meaningful in a category, return an empty list for it.
 """
+)
 
 
 def build_extraction_prompt(user_msg: str, agent_msg: str) -> str:
@@ -89,6 +93,8 @@ def parse_extraction_response(content: str) -> dict:
         if not isinstance(data.get(key), list):
             data[key] = []
         data[key] = [x for x in data[key] if isinstance(x, dict)]
+    for termination in data["terminated_edges"]:
+        validate_termination(termination)
     return {
         "user_facts": data["user_facts"],
         "self_facts": data["self_facts"],
@@ -96,3 +102,9 @@ def parse_extraction_response(content: str) -> dict:
         "terminated_edges": data["terminated_edges"],
         "episode_content": data.get("episode_content") or "",
     }
+
+
+def validate_termination(termination: dict) -> None:
+    """A destructive extraction must identify its memory scope explicitly."""
+    if termination.get("subject") not in ("user", "self", "shared"):
+        raise ValueError("Terminated edges require subject=user, self, or shared")

@@ -145,8 +145,8 @@ def store_trajectory(
 # ── Enterprise Agent Pattern Tools ───────────────────────────────────────
 
 
-@tool
-def search_policy_documents(query: str, user_role: str) -> str:
+@tool(response_format="content_and_artifact")
+def search_policy_documents(query: str, user_role: str) -> tuple[str, dict]:
     """Search enterprise policy documents filtered by the user's access role.
     Only returns documents the user is authorized to see."""
     results = _post(
@@ -157,15 +157,17 @@ def search_policy_documents(query: str, user_role: str) -> str:
         },
     )
     if not results:
-        return "No authorized documents found for this role."
+        return "No authorized documents found for this role.", {"documents": []}
     lines = []
     for d in results:
         lines.append(f"Title: {d['doc_title']}\nContent: {d['content']}")
-    return "\n---\n".join(lines)
+    return "\n---\n".join(lines), {"documents": results}
 
 
-@tool
-def store_policy_document(doc_title: str, allowed_role: str, content: str) -> str:
+@tool(response_format="content_and_artifact")
+def store_policy_document(
+    doc_title: str, allowed_role: str, content: str
+) -> tuple[str, dict]:
     """Store a new enterprise policy document with role-based access control."""
     _post(
         "/enterprise/documents",
@@ -175,7 +177,11 @@ def store_policy_document(doc_title: str, allowed_role: str, content: str) -> st
             "content": content,
         },
     )
-    return f"Policy document '{doc_title}' stored for role '{allowed_role}'."
+    return f"Policy document '{doc_title}' stored for role '{allowed_role}'.", {
+        "documents": [
+            {"doc_title": doc_title, "allowed_role": allowed_role, "content": content}
+        ]
+    }
 
 
 # ── Tutor Agent Pattern Tools ────────────────────────────────────────────
@@ -313,16 +319,19 @@ def get_companion_context(user_id: str, query: str | None = None) -> str:
     ephs = results.get("ephemerals", [])
 
     def _fmt(facts: list) -> str:
-        return "; ".join(
-            f"{f['name']} ({f['entity_type']})"
-            + (
-                f" {f['relationship_type']} {f['related_to']}"
-                if f.get("related_to")
-                else ""
+        return (
+            "; ".join(
+                f"{f['name']} ({f['entity_type']})"
+                + (
+                    f" {f['relationship_type']} {f['related_to']}"
+                    if f.get("related_to")
+                    else ""
+                )
+                + f" [valence={f.get('valence', 0.0)}, intensity={f.get('intensity', 0.5)}]"
+                for f in facts
             )
-            + f" [valence={f.get('valence', 0.0)}, intensity={f.get('intensity', 0.5)}]"
-            for f in facts
-        ) or "(none)"
+            or "(none)"
+        )
 
     ephs_str = "; ".join(e["description"] for e in ephs) or "(none)"
     return (
@@ -416,8 +425,9 @@ def terminate_companion_relationship(
     """Terminate a relationship in the companion's memory graph when a fact is no
     longer true (e.g., the user moved away, changed jobs, or ended a goal)."""
     body = {"user_id": user_id, "name": name, "subject": subject}
-    if relationship_to and relationship_type:
+    if relationship_to is not None:
         body["relationship_to"] = relationship_to
+    if relationship_type is not None:
         body["relationship_type"] = relationship_type
     result = _post("/companion/facts/terminate", body=body)
     return f"Relationship terminated: {name} (status: {result.get('status')})."

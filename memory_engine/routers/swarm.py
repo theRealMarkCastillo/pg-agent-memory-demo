@@ -17,8 +17,11 @@ class TaskClaim(BaseModel):
     agent_name: str
 
 
-class TaskComplete(TaskClaim):
+class TaskLease(TaskClaim):
     lease_token: UUID
+
+
+class TaskComplete(TaskLease):
     payload: dict = Field(default_factory=dict)
 
 
@@ -86,6 +89,22 @@ async def complete_task(task: TaskComplete, request: Request):
     if not row:
         raise HTTPException(409, "Task is not owned by this active lease")
     return {"status": "completed"}
+
+
+@router.post("/tasks/validate-lease")
+async def validate_lease(task: TaskLease, request: Request):
+    """Check ownership immediately before dispatch; external effects still need idempotency."""
+    async with request.app.state.pool.acquire() as conn:
+        owned = await conn.fetchval(
+            """SELECT 1 FROM swarm_blackboard WHERE task_id=$1 AND assigned_agent=$2
+            AND lease_token=$3 AND status='IN_PROGRESS' AND lease_until>clock_timestamp()""",
+            task.task_id,
+            task.agent_name,
+            task.lease_token,
+        )
+    if not owned:
+        raise HTTPException(409, "Task is not owned by this active lease")
+    return {"status": "owned"}
 
 
 @router.get("/tasks/{workflow_id}")

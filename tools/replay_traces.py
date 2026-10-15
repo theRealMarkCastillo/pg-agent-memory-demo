@@ -17,7 +17,6 @@ Reads LLM_* and EMBEDDING_* from .env like the rest of the stack.
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
@@ -26,15 +25,14 @@ import httpx
 
 from parse_traces import parse_trace_dir
 
-sys.path.insert(
-    0, str(Path(__file__).resolve().parents[1] / "demo_agents" / "agents")
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "demo_agents" / "agents"))
 from companion_extraction import (  # noqa: E402
-    EXTRACTION_PROMPT,
-    PREDICATE_VOCAB,
+    EXTRACTION_PROMPT as EXTRACTION_PROMPT,
+    PREDICATE_VOCAB as PREDICATE_VOCAB,
     build_extraction_prompt,
     parse_extraction_response,
-    strip_code_fence as _strip_code_fence,
+    validate_termination,
+    strip_code_fence as _strip_code_fence,  # noqa: F401 - legacy re-export
 )
 
 MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://localhost:8001")
@@ -88,6 +86,8 @@ async def extract_turn(
 async def store_extraction(engine, user_id: str, data: dict):
     """POST extracted facts (user/self/shared), terminations, and episode."""
     results = {"facts": 0, "terminated": 0, "episodes": 0}
+    for termination in data.get("terminated_edges", []) or []:
+        validate_termination(termination)
     episode_content = data.get("episode_content")
     if not episode_content:
         raise ValueError("Extraction must retain its source conversation")
@@ -107,7 +107,7 @@ async def store_extraction(engine, user_id: str, data: dict):
                 "name": t["name"],
                 "relationship_to": t.get("relationship_to"),
                 "relationship_type": t.get("relationship_type"),
-                "subject": t.get("subject", "user"),
+                "subject": t["subject"],
             },
         )
         r.raise_for_status()

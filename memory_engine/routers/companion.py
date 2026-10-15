@@ -6,9 +6,36 @@ import json
 import unicodedata
 import hashlib
 from auth import connection
-from embedding import get_embedding_client
+from embedding import get_embedding_client, embedding_space
 
 router = APIRouter()
+
+
+async def _require_embedding_space(conn, user_id: str, *, writing=False):
+    current = embedding_space()
+    recorded = await conn.fetchval(
+        "SELECT embedding_space FROM companion_memory_state WHERE user_id=$1", user_id
+    )
+    if recorded == current:
+        return
+    populated = await conn.fetchval(
+        """SELECT EXISTS(SELECT 1 FROM companion_chunks WHERE user_id=$1)
+        OR EXISTS(SELECT 1 FROM companion_graph_nodes WHERE user_id=$1)
+        OR EXISTS(SELECT 1 FROM companion_graph_edges WHERE user_id=$1)""",
+        user_id,
+    )
+    if populated:
+        raise HTTPException(
+            409,
+            "Companion embedding model changed or is unknown; reindex this user's memory before vector reads or writes",
+        )
+    if writing:
+        await conn.execute(
+            """INSERT INTO companion_memory_state(user_id,embedding_space) VALUES($1,$2)
+            ON CONFLICT(user_id) DO UPDATE SET embedding_space=EXCLUDED.embedding_space""",
+            user_id,
+            current,
+        )
 
 
 def normalize_name(name: str) -> str:
@@ -187,6 +214,7 @@ class FactTerminate(BaseModel):
 async def create_episode(ep: EpisodeCreate, request: Request):
     ingestion_id = ep.ingestion_id or hashlib.sha256(ep.content.encode()).hexdigest()
     async with connection(request) as conn:
+        await _require_embedding_space(conn, ep.user_id, writing=True)
         existing = await conn.fetchrow(
             "SELECT episode_id,content FROM companion_episodes WHERE user_id=$1 AND ingestion_id=$2",
             ep.user_id,
@@ -446,9 +474,14 @@ async def get_companion_context(
     query: Optional[str] = None,
     limit: int = Query(default=15, ge=1, le=50),
 ):
-    vector = await _embed(query) if query else None
     buckets = {}
-    async with connection(request) as conn:
+    async with connection(request) as conn, conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))", user_id
+        )
+        if query:
+            await _require_embedding_space(conn, user_id)
+        vector = await _embed(query) if query else None
         for subject, key in [
             ("user", "graph_facts"),
             ("self", "self_facts"),
@@ -460,11 +493,11 @@ async def get_companion_context(
                     SELECT e.* FROM companion_graph_edges e
                     WHERE e.user_id=$1 AND e.subject=$2 AND e.status='ACTIVE'
                       AND (e.valid_until IS NULL OR e.valid_until>clock_timestamp())
-                    ORDER BY e.embedding <=> $3::halfvec NULLS LAST,e.edge_id LIMIT 200
+                    ORDER BY e.embedding <=> $3::halfvec LIMIT 200
                 ), node_candidates AS MATERIALIZED (
                     SELECT n.* FROM companion_graph_nodes n WHERE n.user_id=$1 AND n.subject=$2 AND n.is_subject
                       AND NOT EXISTS(SELECT 1 FROM companion_graph_edges e WHERE e.source_node_id=n.node_id AND e.status='ACTIVE')
-                    ORDER BY n.embedding <=> $3::halfvec NULLS LAST,n.node_id LIMIT 100
+                    ORDER BY n.embedding <=> $3::halfvec LIMIT 100
                 ), facts AS (
                     SELECT n.name,n.entity_type,n.salience,n.subject,e.relationship_type,t.name AS related_to,
                            e.valence,e.intensity,e.source_episode_id,1-(e.embedding <=> $3::halfvec) AS relevance
@@ -575,12 +608,12 @@ async def search_episodic_context(
     request: Request,
     limit: int = Query(default=5, ge=1, le=50),
 ):
-    emb_resp = await get_embedding_client().embeddings.create(
-        input=query, model=os.getenv("EMBEDDING_MODEL_NAME")
-    )
-    embedding = emb_resp.data[0].embedding
-
-    async with connection(request) as conn:
+    async with connection(request) as conn, conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))", user_id
+        )
+        await _require_embedding_space(conn, user_id)
+        vector = await _embed(query)
         rows = await conn.fetch(
             """
             SELECT episode_id, content, 1 - (embedding <=> $1::halfvec) AS similarity
@@ -589,7 +622,7 @@ async def search_episodic_context(
             ORDER BY embedding <=> $1::halfvec
             LIMIT $3
             """,
-            json.dumps(embedding),
+            vector,
             user_id,
             limit,
         )
@@ -649,6 +682,7 @@ async def seed_backstory(req: BackstoryRequest, request: Request):
 
 async def _store_fact_conn(conn, fact: GraphFact) -> None:
     """Shared fact-storage helper (add_graph_fact body extracted for reuse)."""
+    await _require_embedding_space(conn, fact.user_id, writing=True)
     name = resolve_entity(fact.name)
     relationship_to = (
         resolve_entity(fact.relationship_to) if fact.relationship_to else None
@@ -756,7 +790,9 @@ async def memory_state(user_id: str, request: Request):
 @router.post("/memory/{user_id}/reindex")
 async def reindex_memory(user_id: str, request: Request):
     """Backfill persisted assertion vectors after a schema or embedding-model migration."""
-    async with connection(request) as conn:
+    async with connection(request) as conn, conn.transaction():
+        # Auth holds the per-user write lock. Publish every vector and its model
+        # identity together; a provider failure rolls the whole reindex back.
         nodes = await conn.fetch(
             "SELECT node_id,name FROM companion_graph_nodes WHERE user_id=$1", user_id
         )
@@ -765,6 +801,9 @@ async def reindex_memory(user_id: str, request: Request):
             FROM companion_graph_edges e JOIN companion_graph_nodes n ON n.node_id=e.source_node_id
             JOIN companion_graph_nodes t ON t.node_id=e.target_node_id WHERE e.user_id=$1""",
             user_id,
+        )
+        chunks = await conn.fetch(
+            "SELECT chunk_id,content FROM companion_chunks WHERE user_id=$1", user_id
         )
         for node in nodes:
             await conn.execute(
@@ -779,7 +818,23 @@ async def reindex_memory(user_id: str, request: Request):
                 edge["edge_id"],
                 await _embed(text),
             )
-    return {"nodes_indexed": len(nodes), "facts_indexed": len(edges)}
+        for chunk in chunks:
+            await conn.execute(
+                "UPDATE companion_chunks SET embedding=$2::halfvec WHERE chunk_id=$1",
+                chunk["chunk_id"],
+                await _embed(chunk["content"]),
+            )
+        await conn.execute(
+            """INSERT INTO companion_memory_state(user_id,embedding_space) VALUES($1,$2)
+            ON CONFLICT(user_id) DO UPDATE SET embedding_space=EXCLUDED.embedding_space""",
+            user_id,
+            embedding_space(),
+        )
+    return {
+        "nodes_indexed": len(nodes),
+        "facts_indexed": len(edges),
+        "chunks_indexed": len(chunks),
+    }
 
 
 class LegacyPurge(BaseModel):

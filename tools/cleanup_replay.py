@@ -79,18 +79,27 @@ async def main() -> int:
             return 0
         parser.error("provide --user-id or --all-replay")
 
+    failed = False
     async with httpx.AsyncClient(
         base_url=args.engine_url,
         timeout=30.0,
         headers={"Authorization": "Bearer " + os.environ["MEMORY_API_TOKEN"]},
     ) as client:
         for uid in user_ids:
-            resp = await client.delete(f"/companion/memory/{uid}")
+            from urllib.parse import quote
+
+            try:
+                resp = await client.delete(f"/companion/memory/{quote(uid, safe='')}")
+            except httpx.RequestError as exc:
+                failed = True
+                print(f"FAILED {uid}: {exc}")
+                continue
             if resp.status_code == 200:
                 print(f"forgotten: {uid} -> {resp.json()}")
             else:
+                failed = True
                 print(f"FAILED {uid}: {resp.status_code} {resp.text}")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

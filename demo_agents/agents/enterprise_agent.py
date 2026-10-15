@@ -70,12 +70,21 @@ async def search_policy_docs(state: AgentState):
 
 async def agent_node(state: AgentState):
     messages = state.get("messages", [])
-    # Check whether a tool has already returned policy results or stored a document in this turn
+    # Evidence is supplied by successful application tools, never inferred from
+    # their display text (which can also contain errors or document prose).
     turn_has_tool_output = False
     for m in reversed(messages):
         if getattr(m, "type", "") == "human":
             break
-        if getattr(m, "type", "") == "tool" and "No authorized documents found" not in str(m.content):
+        artifact = getattr(m, "artifact", None)
+        if (
+            getattr(m, "type", "") == "tool"
+            and getattr(m, "status", None) == "success"
+            and getattr(m, "name", None)
+            in {"search_policy_documents", "store_policy_document"}
+            and isinstance(artifact, dict)
+            and artifact.get("documents")
+        ):
             turn_has_tool_output = True
             break
 

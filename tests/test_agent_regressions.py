@@ -191,7 +191,7 @@ def test_shell_uses_isolated_container_and_no_credentials(
     monkeypatch.setattr(
         agents.tools,
         "run_container",
-        lambda args: (calls.append(args) or "exit code: 0"),
+        lambda args: calls.append(args) or "exit code: 0",
     )
     agents.tools.execute_shell_command.invoke({"command": "echo ok"})
     command = calls[0]
@@ -246,24 +246,12 @@ async def test_swarm_graph_persists_parallel_claims(client, agents, monkeypatch)
                     content="",
                     tool_calls=[
                         {
-                            "id": "claim",
-                            "name": "claim_task",
-                            "args": {"task_id": task_id, "agent_name": agent_name},
-                        }
-                    ],
-                )
-            if len(results) == 1:
-                lease = re.search(r"Lease token: (\S+)", results[0].content).group(1)
-                return AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
                             "id": "complete",
                             "name": "complete_swarm_task",
                             "args": {
                                 "task_id": task_id,
                                 "agent_name": agent_name,
-                                "lease_token": lease,
+                                "lease_token": "application-supplied",
                                 "result_summary": "done",
                             },
                         }
@@ -344,22 +332,7 @@ async def test_swarm_worker_pull_mode_claims_next_task(client, agents, monkeypat
         async def ainvoke(self, messages):
             results = [m for m in messages if m.type == "tool"]
             if not results:
-                return AIMessage(
-                    content="",
-                    tool_calls=[
-                        {
-                            "id": "claim-next",
-                            "name": "claim_next_task",
-                            "args": {
-                                "agent_name": "summary-bot",
-                                "workflow_id": "pull-wf",
-                            },
-                        }
-                    ],
-                )
-            if len(results) == 1:
-                task_id = re.search(r"\(ID: ([^)]+)\)", results[0].content).group(1)
-                lease = re.search(r"Lease token: (\S+)", results[0].content).group(1)
+                task_id = re.search(r"\(id: ([^)]+)\)", messages[0].content).group(1)
                 return AIMessage(
                     content="",
                     tool_calls=[
@@ -369,7 +342,7 @@ async def test_swarm_worker_pull_mode_claims_next_task(client, agents, monkeypat
                             "args": {
                                 "task_id": task_id,
                                 "agent_name": "summary-bot",
-                                "lease_token": lease,
+                                "lease_token": "application-supplied",
                                 "result_summary": "pulled and completed",
                             },
                         }
@@ -394,7 +367,9 @@ async def test_swarm_worker_pull_mode_claims_next_task(client, agents, monkeypat
 async def test_demo_seed_data_populates_canonical_patterns(client, agents, monkeypatch):
     import main as demo_main
 
-    monkeypatch.setattr(demo_main, "MEMORY_ENGINE_URL", str(client.base_url).rstrip("/"))
+    monkeypatch.setattr(
+        demo_main, "MEMORY_ENGINE_URL", str(client.base_url).rstrip("/")
+    )
     await demo_main.seed_data(client)
 
     # Pattern 2: High-score trajectory recalled, low-score (0.20) excluded by quality gate
@@ -408,18 +383,12 @@ async def test_demo_seed_data_populates_canonical_patterns(client, agents, monke
     assert trajs and all(t["success_score"] >= 0.7 for t in trajs)
 
     # Pattern 4: Ebbinghaus decay turns 15-day-old 0.85 mastery into a gap (<0.7)
-    gaps = {
-        g["skill_name"]: g
-        for g in await get(client, "/tutor/gaps/learner_001")
-    }
+    gaps = {g["skill_name"]: g for g in await get(client, "/tutor/gaps/learner_001")}
     assert gaps["python_basics"]["status"] == "mastered"
     assert gaps["database_design"]["status"] == "gap"
     assert gaps["database_design"]["decayed_score"] < 0.45
 
     # Pattern 6: Canonical subject-first edges + common ground between user and Iris
     ctx = await get(client, "/companion/context", user_id="usr_anthony")
-    common = agents.companion._find_common_ground(
-        ctx["graph_facts"], ctx["self_facts"]
-    )
+    common = agents.companion._find_common_ground(ctx["graph_facts"], ctx["self_facts"])
     assert "long conversations" in common
-

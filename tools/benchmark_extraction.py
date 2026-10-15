@@ -17,14 +17,11 @@ Usage:
 
 import argparse
 import asyncio
-import json
 import sys
 from pathlib import Path
 
 from parse_traces import parse_trace_file
 from replay_traces import (
-    PREDICATE_VOCAB,
-    _strip_code_fence,
     build_extraction_prompt,
     get_openai_client,
     parse_extraction_response,
@@ -136,10 +133,22 @@ def _entity_overlap(a: str, b: str) -> bool:
 
 
 def match_fact(our_fact: dict, prod_fact: dict) -> bool:
-    """Return True if our fact aligns with a production fact (entity+predicate)."""
-    if our_fact.get("subject", "user") != prod_fact.get(
-        "scope", prod_fact.get("subject", "user")
-    ):
+    """Match source, scope, predicate and object; labels own source aliases."""
+    scope = prod_fact.get("scope", prod_fact.get("subject", "user"))
+    if our_fact.get("subject", "user") != scope:
+        return False
+    implicit_sources = {
+        "user": {"user", "me", "i", "myself"},
+        "self": {"companion", "ai", "self"},
+        "shared": {"we", "us"},
+    }
+    source = prod_fact.get("source_entity")
+    sources = {_norm(source)} if source else implicit_sources.get(scope, set())
+    aliases = prod_fact.get("source_aliases", [])
+    if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+        raise ValueError("source_aliases must be a list of entity names")
+    sources = sources | {_norm(alias) for alias in aliases}
+    if _norm(our_fact.get("name") or "") not in sources:
         return False
     our_entity = _real_entity_ours(our_fact)
     prod_entity = _real_entity_prod(prod_fact)

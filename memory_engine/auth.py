@@ -73,11 +73,31 @@ async def authorize(request: Request, bearer=Depends(_bearer)):
         )
     except (ValueError, UnicodeDecodeError):
         body = {}
-    values = (
-        dict(request.query_params)
-        | (body if isinstance(body, dict) else {})
-        | request.path_params
-    )
+    # Check every occurrence before merging. Query-only endpoints must never
+    # authorize an ignored JSON field in place of the value they actually use.
+    scope_fields = {
+        "user_id",
+        "user_role",
+        "allowed_role",
+        "workflow_id",
+        "agent_id",
+        "agent_name",
+        "project_id",
+        "git_branch",
+        "task_id",
+    }
+    values = {}
+    for key, value in (
+        list(request.query_params.multi_items())
+        + list(body.items() if isinstance(body, dict) else [])
+        + list(request.path_params.items())
+    ):
+        if key in scope_fields:
+            if key in values and values[key] != value:
+                raise HTTPException(422, f"Conflicting {key} values")
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(422, f"{key} must be a string")
+        values[key] = value
     for field in (
         "user_id",
         "user_role",

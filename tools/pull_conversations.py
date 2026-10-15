@@ -18,9 +18,22 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 BASE_URL = "https://api.smith.langchain.com"
 KEY_HEADER = "x-api-key"
+
+
+def timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timezone required")
+        return parsed.astimezone(timezone.utc)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Use an ISO timestamp with a timezone"
+        ) from exc
 
 
 def load_env(env_path: Path) -> dict:
@@ -49,7 +62,7 @@ def api_post(path: str, api_key: str, body: dict, retries: int = 4) -> dict:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             raise
     raise RuntimeError("unreachable")
@@ -83,12 +96,34 @@ def has_conversation(runs: list) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", default=None, help="project name")
-    parser.add_argument("--session", default=None, help="session uuid (overrides --project)")
+    parser.add_argument(
+        "--session", default=None, help="session uuid (overrides --project)"
+    )
     parser.add_argument("--out", default="traces", help="output directory")
-    parser.add_argument("--max-pages", type=int, default=80, help="max pagination pages")
-    parser.add_argument("--end-time", default="2026-08-16T12:00:00Z", help="start cursor")
-    parser.add_argument("--min-time", default="2026-07-01T00:00:00Z", help="stop at this age")
+    parser.add_argument(
+        "--max-pages", type=int, default=80, help="max pagination pages"
+    )
+    parser.add_argument(
+        "--end-time", type=timestamp, help="upper bound (default: current UTC time)"
+    )
+    parser.add_argument(
+        "--min-time",
+        type=timestamp,
+        help="explicit lower bound, overriding --lookback-days",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=30,
+        help="days before end-time to include (default: 30)",
+    )
     args = parser.parse_args()
+    if args.lookback_days < 1:
+        parser.error("--lookback-days must be positive")
+    end_bound = args.end_time or datetime.now(timezone.utc)
+    min_bound = args.min_time or end_bound - timedelta(days=args.lookback_days)
+    if min_bound >= end_bound:
+        parser.error("--min-time must precede --end-time")
 
     env = load_env(Path(".env"))
     api_key = os.getenv("LANGSMITH_API_KEY") or env.get("LANGSMITH_API_KEY")
@@ -97,7 +132,9 @@ def main() -> int:
         return 1
 
     session = args.session or (
-        resolve_session(api_key, args.project) if args.project else env.get("LANGSMITH_PROJECT")
+        resolve_session(api_key, args.project)
+        if args.project
+        else env.get("LANGSMITH_PROJECT")
     )
     if not session:
         print("ERROR: provide --session, --project, or LANGSMITH_PROJECT")
@@ -109,7 +146,7 @@ def main() -> int:
     seen = {f.stem for f in out_dir.glob("*.json")}
     files = len(seen)
     top_count = 0
-    end_time = args.end_time
+    end_time = end_bound.isoformat()
 
     print(f"Pulling from session {session} into {out_dir}/ (have {files} already)")
     for page in range(args.max_pages):
@@ -122,6 +159,8 @@ def main() -> int:
         oldest = runs[-1].get("start_time")
 
         for r in runs:
+            if r.get("start_time") and timestamp(r["start_time"]) < min_bound:
+                continue
             tid = r.get("trace_id") or r.get("id")
             if tid in seen:
                 continue
@@ -142,13 +181,15 @@ def main() -> int:
             if not has_conversation(exp):
                 continue
             path = out_dir / f"{tid}.json"
-            path.write_text(json.dumps({"trace_id": tid, "runs": exp}, indent=2, default=str))
+            path.write_text(
+                json.dumps({"trace_id": tid, "runs": exp}, indent=2, default=str)
+            )
             files += 1
             print(f"  saved {tid[:12]} ({len(exp)} runs)")
             time.sleep(0.5)
 
         print(f"page {page}: cursor->{oldest} (unique seen {top_count}, saved {files})")
-        if not oldest or oldest < args.min_time:
+        if not oldest or timestamp(oldest) <= min_bound:
             break
         end_time = oldest
         time.sleep(1)

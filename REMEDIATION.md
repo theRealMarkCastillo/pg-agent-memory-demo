@@ -2,7 +2,7 @@
 
 The review findings are covered by API, graph, database, and pipeline regressions in
 `tests/test_review_regressions.py`, `tests/test_agent_regressions.py`, and
-`tests/test_pipeline_regressions.py`. Existing integration tests now run against
+`tests/test_pipeline_regressions.py`, and `tests/test_followup_regressions.py`. Existing integration tests now run against
 fresh data per test, and assert real outcomes instead of accepting empty results.
 
 ## Start or upgrade
@@ -20,8 +20,14 @@ fresh data per test, and assert real outcomes instead of accepting empty results
    roles, projects/branches, workflows, and agents. A role request never grants a role.
 5. Existing companion rows retain their data but need persisted vectors backfilled:
    POST `/companion/memory/{user_id}/reindex` with an authorized write credential.
-   This embeds complete assertions. Run it after changing the embedding model too;
-   all stored vectors must use the same model and dimensionality.
+   This atomically re-embeds nodes, complete assertions, and episode chunks. Migration
+   `002_embedding_space.sql` marks existing vector spaces as unknown; companion vector
+   reads/writes return 409 until reindexing succeeds. Plain unranked context reads,
+   termination, and deletion remain available. Provider URL, model name, dimension,
+   and optional `EMBEDDING_REVISION` identify the vector space. Bump the revision for
+   provider weight changes behind an unchanged model name. Failed reindexing preserves
+   the previous vectors and identity. Developer, enterprise, and trajectory vectors
+   still require separate reingestion when changing the shared embedding configuration.
 
 Existing duplicate symbols are retained in `migration_duplicate_symbols`, while
 only the newest version remains in the current symbol index. Duplicate active
@@ -71,6 +77,10 @@ are deleted with that user's memory. Do not describe legacy retained backups as 
 - Swarm claims carry a random lease token and expire after five minutes. Completion
   requires the claimant, current lease, and IN_PROGRESS state. Expired tasks are
   reclaimable; old workers cannot complete a replacement worker's lease.
+  Workers claim in application code before invoking a model, validate the lease before
+  each tool dispatch, and stop on failed claims or lost leases. Completion receives
+  application-owned task/agent/lease values. Remote effects still require idempotency
+  or destination-side fencing: a pre-dispatch check cannot guarantee exactly-once execution.
 - File tools reject traversal and symlinks. Shell tools are disabled unless a trusted
   local operator enables `ENABLE_SHELL_SANDBOX=1` with Docker available. Each command
   runs in a disposable container with only the workspace mounted, no network, no agent
@@ -104,10 +114,20 @@ When labels come from another model, results measure agreement, not verified tru
 `eval_recall.py` accepts labeled probes and reports precision/recall at the requested
 limit; `--min-recall` makes misses fail the command. Unlabeled probes are inspection only.
 Example probe: `[{"query":"Where do I live?","expected":[{"predicate":"LIVES_IN","object_value":"Tokyo","scope":"user"}]}]`.
+Labels now match source entity as well as scope, predicate, and object. Implicit sources
+are user (`user`, `me`, `i`, `myself`), companion (`companion`, `ai`, `self`), and shared
+(`we`, `us`). Supply `source_entity` for another person or `source_aliases` for explicit
+equivalent names, such as `"source_aliases":["Alice"]` on a user label. Names are never
+assumed equivalent merely because they appear in the same memory scope.
 
 Replay extracts turns concurrently and commits in source order, creating source episodes
 before facts. Trace files are ordered by recorded start time when available, with filename
 as a fallback for undated exports. Use chronologically named files if timestamps are absent.
+Extracted terminations require an explicit `subject` (`user`, `self`, or `shared`);
+ambiguous terminations are rejected. Tool termination filters are applied independently.
+Trace downloads default to the preceding 30 days ending at current UTC time. Set
+`--lookback-days`, or explicit timezone-aware `--end-time` and `--min-time` bounds,
+for other windows. Cleanup attempts all requested users and exits nonzero if any deletion fails.
 
 Normal `make down` and `make ci` preserve persistent volumes. `make clean` explicitly
 removes them. Initialization/migration and deletion should be exercised on a disposable

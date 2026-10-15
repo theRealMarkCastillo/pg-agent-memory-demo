@@ -110,7 +110,8 @@ CREATE INDEX swarm_pending ON swarm_blackboard (workflow_id, status, created_at)
 CREATE TABLE companion_memory_state (
     user_id TEXT PRIMARY KEY,
     enabled BOOLEAN NOT NULL DEFAULT true,
-    generation INTEGER NOT NULL DEFAULT 0
+    generation INTEGER NOT NULL DEFAULT 0,
+    embedding_space TEXT
 );
 
 CREATE TABLE companion_episodes (

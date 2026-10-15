@@ -277,12 +277,12 @@ The LangGraph agent uses a **supervisor + Send API fan-out** topology:
 
 1. A `supervisor` node reads the shared blackboard and collects every PENDING task
 2. A conditional edge returns one `Send` per task, dispatching parallel worker nodes
-3. Each `worker` node is a tool-calling agent that claims its assigned task by ID, executes it with real tools, marks it complete, and reports back
+3. Each `worker` claims its assigned task in application code before invoking the model, validates the lease before tool dispatch, executes it with real tools, marks it complete, and reports back
 4. An `aggregate` node merges worker reports (via a reducer) into a final summary and snapshots the blackboard
 
 The workers run concurrently; safe claiming is still enforced at the database layer via `FOR UPDATE SKIP LOCKED`, so a worker can never claim a task that another worker already took.
 
-**Tools available**: `list_workflow_tasks`, `claim_next_task`, `claim_task`, `complete_swarm_task`, `execute_shell_command`, `fetch_url`
+**Worker model tools**: `list_workflow_tasks`, `complete_swarm_task`, `execute_shell_command`, `fetch_url`. Claiming is application-owned; `claim_next_task` and `claim_task` remain available as standalone API tools.
 
 **What changed from the original**: The swarm is no longer a sequence of independent agent invocations. A single supervisor invocation fans out to parallel specialist workers via the LangGraph Send API — combining LangGraph-level multi-agent topology with the DB-level SKIP LOCKED blackboard. Multi-agent concurrency is validated in the test suite (`test_skip_locked_no_deadlock`, `test_eval_swarm_concurrency`).
 

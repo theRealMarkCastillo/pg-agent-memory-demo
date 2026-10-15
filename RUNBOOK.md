@@ -168,7 +168,7 @@ supervisor → [Send per pending task] → worker (claim → execute → complet
 | Task | `recall_past_trajectories` | 6 (search + store + shell + HTTP + read + write) | Yes |
 | Enterprise | `search_policy_docs` | 2 (search + store) | Yes |
 | Tutor | `assess_skill_gaps` | 2 (get gaps + update progress) | Yes |
-| Swarm | `supervisor` (Send API) | 6 (list + claim-next + claim + complete + shell + HTTP) | Yes |
+| Swarm | `supervisor` (Send API) | 4 model tools (list + complete + shell + HTTP); application claims | Yes |
 | Companion | `retrieve_companion_context` | 7 (context + search + episode + fact + ephemeral + terminate + forget) | Yes |
 
 The Companion graph has four nodes — the standard `retrieve → agent → tools` loop plus a **3-scope extraction node**:

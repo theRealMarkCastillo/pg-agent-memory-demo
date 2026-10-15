@@ -6,7 +6,11 @@ from langgraph.graph import StateGraph, END, add_messages
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import COMPANION_TOOLS
 from .checkpointer import get_checkpointer
-from .companion_extraction import build_extraction_prompt, parse_extraction_response
+from .companion_extraction import (
+    build_extraction_prompt,
+    parse_extraction_response,
+    validate_termination,
+)
 from .runtime import (
     auth_headers,
     refresh_messages,
@@ -227,6 +231,7 @@ async def extract_memory(state: AgentState):
 
         terminated = data.get("terminated_edges", []) or []
         for t in terminated:
+            validate_termination(t)
             if not t.get("name"):
                 continue
             terminate_res = await client.post(
@@ -236,7 +241,7 @@ async def extract_memory(state: AgentState):
                     "name": t["name"],
                     "relationship_to": t.get("relationship_to"),
                     "relationship_type": t.get("relationship_type"),
-                    "subject": t.get("subject", "user"),
+                    "subject": t["subject"],
                 },
             )
             terminate_res.raise_for_status()

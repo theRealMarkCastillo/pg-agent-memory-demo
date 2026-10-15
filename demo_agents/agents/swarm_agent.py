@@ -33,8 +33,11 @@ llm = ChatOpenAI(
     temperature=0.4,
 )
 
-llm_with_tools = llm.bind_tools(SWARM_TOOLS)
-TOOLS_BY_NAME = {t.name: t for t in SWARM_TOOLS}
+WORKER_TOOLS = [
+    t for t in SWARM_TOOLS if t.name not in {"claim_task", "claim_next_task"}
+]
+llm_with_tools = llm.bind_tools(WORKER_TOOLS)
+TOOLS_BY_NAME = {t.name: t for t in WORKER_TOOLS}
 
 SPECIALTY_MAP = {
     "analyze_sentiment": "sentiment-bot",
@@ -83,87 +86,114 @@ def assign_tasks(state: SwarmState):
     ]
 
 
+def _worker_report(agent_name, task_name, report):
+    line = f"[{agent_name}] {task_name}: {report}"
+    return {"reports": [line], "messages": [AIMessage(content=line)]}
+
+
 async def worker_node(state: SwarmState):
-    """A specialist worker: claim its assigned task, execute it, and report back."""
-    task = state.get("worker_task") or {}
-    task_id = task.get("task_id")
-    task_name = task.get("task_name", "next_available_task")
+    """Claim in application code before the model can dispatch any execution."""
+    assigned = state.get("worker_task") or {}
     agent_name = state.get("agent_name", "worker-bot")
     workflow_id = state["workflow_id"]
-
-    if task_id:
-        assignment_block = (
-            f"Your assigned task: {task_name} (id: {task_id})\n"
-            f"Payload: {task.get('payload', {})}\n\n"
-            "Do the following, in order:\n"
-            "1. Claim YOUR task with claim_task, using the exact task_id above.\n"
-        )
-    else:
-        assignment_block = (
-            "No specific task_id was pre-assigned.\n\n"
-            "Do the following, in order:\n"
-            "1. Claim the next pending task in the workflow using claim_next_task.\n"
-        )
-
-    system_content = (
-        "You are a specialist worker in a multi-agent swarm. A supervisor has fanned "
-        "work out to you in parallel, and other workers are handling their own tasks.\n"
-        f"Your name: {agent_name}\n"
-        f"Workflow: {workflow_id}\n"
-        f"{assignment_block}"
-        "2. Execute the task using execute_shell_command or fetch_url as appropriate.\n"
-        "3. Mark it complete with complete_swarm_task and a concise result summary.\n"
-        "4. End with a one-line report of what you did.\n"
-        "Do not claim tasks assigned to other workers."
-    )
-    messages = [
-        SystemMessage(content=system_content),
-        HumanMessage(content=f"Process task '{task_name}' now."),
-    ]
-
-    for _ in range(8):
-        response = await llm_with_tools.ainvoke(prompt_messages(messages))
-        messages.append(response)
-        if not getattr(response, "tool_calls", None):
-            break
-        for tc in response.tool_calls:
-            tool = TOOLS_BY_NAME.get(tc["name"])
-            if tool is None:
-                result = f"Unknown tool '{tc['name']}'."
-            else:
-                try:
-                    args = bound_args(state, tc["args"])
-                    if tc["name"] == "claim_next_task":
-                        if task.get("task_id"):
-                            raise ValueError("Workers must claim their assigned task")
-                        args["workflow_id"] = workflow_id
-                        args["agent_name"] = agent_name
-                    if tc["name"] in ("claim_task", "complete_swarm_task") and task.get(
-                        "task_id"
-                    ):
-                        args["task_id"] = task["task_id"]
-                    result = await tool.ainvoke(args)
-                except Exception as e:
-                    result = f"Tool error: {e}"
-            messages.append(
-                ToolMessage(content=str(result), tool_call_id=tc["id"], name=tc["name"])
+    async with httpx.AsyncClient(timeout=30.0, headers=auth_headers()) as client:
+        if assigned.get("task_id"):
+            res = await client.post(
+                f"{MEMORY_ENGINE_URL}/swarm/tasks/claim",
+                json={"task_id": assigned["task_id"], "agent_name": agent_name},
             )
+        else:
+            res = await client.post(
+                f"{MEMORY_ENGINE_URL}/swarm/tasks/claim-next",
+                params={"workflow_id": workflow_id, "agent_name": agent_name},
+            )
+        res.raise_for_status()
+        claim = res.json()
+        if claim.get("status") != "claimed":
+            return _worker_report(
+                agent_name,
+                assigned.get("task_name", "task"),
+                "Not claimed; execution skipped.",
+            )
+        task = claim["task"]
+        task_name = task["task_name"]
+        lease = {
+            "task_id": task["task_id"],
+            "agent_name": agent_name,
+            "lease_token": task["lease_token"],
+        }
+        messages = [
+            SystemMessage(
+                content=(
+                    "You are a specialist worker. The application has already claimed your task.\n"
+                    f"Your name: {agent_name}\nWorkflow: {workflow_id}\n"
+                    f"Your assigned task: {task_name} (id: {task['task_id']})\n"
+                    f"Payload: {task.get('payload', {})}\n"
+                    "Execute the task using execute_shell_command or fetch_url as appropriate. "
+                    "Then call complete_swarm_task with a concise result summary and end with a report. "
+                    "The application supplies task identity and lease credentials at dispatch."
+                )
+            ),
+            HumanMessage(content=f"Process task '{task_name}' now."),
+        ]
+        completed = False
+        for _ in range(8):
+            response = await llm_with_tools.ainvoke(prompt_messages(messages))
+            messages.append(response)
+            if not getattr(response, "tool_calls", None):
+                break
+            for tc in response.tool_calls:
+                tool = TOOLS_BY_NAME.get(tc["name"])
+                status = "success"
+                if tool is None:
+                    result, status = f"Unknown tool '{tc['name']}'.", "error"
+                elif completed:
+                    result, status = (
+                        "Task is already completed; further tools are disabled.",
+                        "error",
+                    )
+                else:
+                    # Fail closed on stale leases and transport failures. This is a
+                    # pre-dispatch check, not exactly-once execution of remote effects.
+                    owned = await client.post(
+                        f"{MEMORY_ENGINE_URL}/swarm/tasks/validate-lease", json=lease
+                    )
+                    if owned.status_code == 409:
+                        return _worker_report(
+                            agent_name, task_name, "Lease lost; execution stopped."
+                        )
+                    owned.raise_for_status()
+                    try:
+                        args = bound_args(
+                            dict(state, agent_name=agent_name), tc["args"]
+                        )
+                        if tc["name"] == "complete_swarm_task":
+                            args.update(lease)
+                        result = await tool.ainvoke(args)
+                        if tc["name"] == "complete_swarm_task":
+                            completed = True
+                    except Exception as exc:
+                        result, status = f"Tool error: {exc}", "error"
+                messages.append(
+                    ToolMessage(
+                        content=str(result),
+                        tool_call_id=tc["id"],
+                        name=tc["name"],
+                        status=status,
+                    )
+                )
 
-    report = ""
-    for m in reversed(messages):
-        if getattr(m, "tool_calls", None):
-            continue
-        if getattr(m, "type", "") == "tool":
-            continue
-        if getattr(m, "content", None):
-            report = m.content
-            break
-
-    summary_line = f"[{agent_name}] {task.get('task_name', 'task')}: {report}"
-    return {
-        "reports": [summary_line],
-        "messages": [AIMessage(content=summary_line)],
-    }
+        report = next(
+            (
+                m.content
+                for m in reversed(messages)
+                if m.type == "ai" and not getattr(m, "tool_calls", None)
+            ),
+            "No final report.",
+        )
+        if not completed:
+            report = "Incomplete (no successful completion recorded). " + str(report)
+        return _worker_report(agent_name, task_name, report)
 
 
 async def aggregate_node(state: SwarmState):
