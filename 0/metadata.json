@@ -1,0 +1,70 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M50TJMFDY5XME7XENMWB5FSB",
+  "session_id": "01a1412f-ef87-7ea3-92af-850dabfce99b",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-15T22:22:58.573541Z",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [
+    ".env.example",
+    "GUIDE.md",
+    "REMEDIATION.md",
+    "RUNBOOK.md",
+    "demo_agents/agents/companion_agent.py",
+    "demo_agents/agents/companion_extraction.py",
+    "demo_agents/agents/enterprise_agent.py",
+    "demo_agents/agents/swarm_agent.py",
+    "demo_agents/agents/tools.py",
+    "docker-compose.yml",
+    "memory_engine/auth.py",
+    "memory_engine/embedding.py",
+    "memory_engine/migrations/002_embedding_space.sql",
+    "memory_engine/routers/companion.py",
+    "memory_engine/routers/swarm.py",
+    "postgres/init.sql",
+    "tests/test_agent_regressions.py",
+    "tests/test_followup_regressions.py",
+    "tools/benchmark_extraction.py",
+    "tools/cleanup_replay.py",
+    "tools/pull_conversations.py",
+    "tools/replay_traces.py"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "b30dc862ab42",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 254269,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 5792128,
+    "output_tokens": 38754,
+    "api_call_count": 50,
+    "subagent_tokens_complete": true
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-15T22:22:58.535175Z",
+    "agent_lines": 1107,
+    "agent_removed": 196,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1107,
+    "total_lines_changed": 1303,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}

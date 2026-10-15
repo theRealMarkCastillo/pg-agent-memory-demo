@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M50TJMFDY5XME7XENMWB5FSB",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": [
+    ".env.example",
+    "GUIDE.md",
+    "REMEDIATION.md",
+    "RUNBOOK.md",
+    "demo_agents/agents/companion_agent.py",
+    "demo_agents/agents/companion_extraction.py",
+    "demo_agents/agents/enterprise_agent.py",
+    "demo_agents/agents/swarm_agent.py",
+    "demo_agents/agents/tools.py",
+    "docker-compose.yml",
+    "memory_engine/auth.py",
+    "memory_engine/embedding.py",
+    "memory_engine/migrations/002_embedding_space.sql",
+    "memory_engine/routers/companion.py",
+    "memory_engine/routers/swarm.py",
+    "postgres/init.sql",
+    "tests/test_agent_regressions.py",
+    "tests/test_followup_regressions.py",
+    "tools/benchmark_extraction.py",
+    "tools/cleanup_replay.py",
+    "tools/pull_conversations.py",
+    "tools/replay_traces.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 254269,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 5792128,
+    "output_tokens": 38754,
+    "api_call_count": 50,
+    "subagent_tokens_complete": true
+  }
+}
