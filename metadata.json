@@ -1,0 +1,44 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M50JMGE7AA88ZTTYF22H267A",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "GUIDE.md",
+    "README.md",
+    "RUNBOOK.md",
+    "demo_agents/agents/companion_agent.py",
+    "demo_agents/agents/companion_extraction.py",
+    "demo_agents/agents/enterprise_agent.py",
+    "demo_agents/agents/swarm_agent.py",
+    "demo_agents/agents/tools.py",
+    "demo_agents/main.py",
+    "docker-compose.yml",
+    "memory_engine/migrations/001_review_fixes.sql",
+    "memory_engine/routers/tutor.py",
+    "postgres/init.sql",
+    "tests/test_agent_regressions.py",
+    "tests/test_companion.py",
+    "tests/test_pipeline_regressions.py",
+    "tests/test_tutor.py",
+    "tools/benchmark_extraction.py",
+    "tools/configure_auth.py",
+    "tools/replay_traces.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 123769,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1148401,
+    "output_tokens": 3994,
+    "api_call_count": 22
+  }
+}

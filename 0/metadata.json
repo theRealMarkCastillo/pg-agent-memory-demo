@@ -1,0 +1,134 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M50JMGE7AA88ZTTYF22H267A",
+  "session_id": "ca7a73aa-c95f-41f7-8291-3fe2e578b35a",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-15T20:04:35.283472Z",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "save_step_count": 3,
+  "files_touched": [
+    "GUIDE.md",
+    "README.md",
+    "RUNBOOK.md",
+    "demo_agents/agents/companion_agent.py",
+    "demo_agents/agents/companion_extraction.py",
+    "demo_agents/agents/enterprise_agent.py",
+    "demo_agents/agents/swarm_agent.py",
+    "demo_agents/agents/tools.py",
+    "demo_agents/main.py",
+    "docker-compose.yml",
+    "memory_engine/migrations/001_review_fixes.sql",
+    "memory_engine/routers/tutor.py",
+    "postgres/init.sql",
+    "tests/test_agent_regressions.py",
+    "tests/test_companion.py",
+    "tests/test_pipeline_regressions.py",
+    "tests/test_tutor.py",
+    "tools/benchmark_extraction.py",
+    "tools/configure_auth.py",
+    "tools/replay_traces.py"
+  ],
+  "agent": "Antigravity",
+  "model": "",
+  "turn_id": "0fc176675567",
+  "token_usage": {
+    "input_tokens": 123769,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1148401,
+    "output_tokens": 3994,
+    "api_call_count": 22
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-15T20:04:35.264198Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 125,
+    "human_removed": 204,
+    "total_committed": 0,
+    "total_lines_changed": 329,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 602,
+      "user_lines_removed": 323,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "GUIDE.md": 8,
+        "README.md": 2,
+        "RUNBOOK.md": 7,
+        "demo_agents/agents/companion_agent.py": 3,
+        "demo_agents/agents/companion_extraction.py": 98,
+        "demo_agents/agents/enterprise_agent.py": 26,
+        "demo_agents/agents/swarm_agent.py": 11,
+        "demo_agents/agents/tools.py": 39,
+        "demo_agents/main.py": 53,
+        "docker-compose.yml": 1,
+        "memory_engine/migrations/001_review_fixes.sql": 143,
+        "memory_engine/routers/tutor.py": 25,
+        "postgres/init.sql": 70,
+        "tests/test_agent_regressions.py": 41,
+        "tests/test_companion.py": 17,
+        "tests/test_pipeline_regressions.py": 15,
+        "tests/test_tutor.py": 19,
+        "tools/benchmark_extraction.py": 10,
+        "tools/configure_auth.py": 1,
+        "tools/replay_traces.py": 13
+      },
+      "user_removed_per_file": {
+        "GUIDE.md": 8,
+        "README.md": 2,
+        "RUNBOOK.md": 5,
+        "demo_agents/agents/companion_agent.py": 47,
+        "demo_agents/agents/enterprise_agent.py": 2,
+        "demo_agents/agents/swarm_agent.py": 5,
+        "demo_agents/agents/tools.py": 19,
+        "demo_agents/main.py": 14,
+        "docker-compose.yml": 1,
+        "memory_engine/migrations/001_review_fixes.sql": 44,
+        "memory_engine/routers/tutor.py": 10,
+        "postgres/init.sql": 18,
+        "tests/test_companion.py": 16,
+        "tools/benchmark_extraction.py": 50,
+        "tools/replay_traces.py": 82
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 125,
+      "user_lines_removed": 6,
+      "agent_lines_added": 602,
+      "agent_lines_removed": 323,
+      "user_added_per_file": {
+        "demo_agents/agents/swarm_agent.py": 19,
+        "demo_agents/main.py": 10,
+        "tests/test_agent_regressions.py": 96
+      },
+      "user_removed_per_file": {
+        "demo_agents/agents/swarm_agent.py": 6
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 727,
+      "agent_lines_removed": 329
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 727,
+      "agent_lines_removed": 329
+    }
+  ]
+}

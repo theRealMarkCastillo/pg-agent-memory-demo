@@ -1,0 +1,17 @@
+code review and design review. do the main use cases get represented well for an educational repo (not production)?
+
+---
+
+right.. we focused on the companion one as it was very complext. ok let's fix all the main issues.
+
+---
+
+anything else? final code review?
+
+---
+
+ok are we ready for commit and push?
+
+---
+
+yes
