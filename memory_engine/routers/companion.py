@@ -21,7 +21,7 @@ def normalize_name(name: str) -> str:
 
 
 _ALIASES = {
-    "user": {"user", "me", "i", "myself", "self"},
+    "user": {"user", "me", "i", "myself"},
     "companion": {"companion", "ai", "ai companion", "ai companion character"},
 }
 
@@ -116,6 +116,19 @@ _RELATION_SYNONYMS = {
     "willing to spend significant money on": "spends_money_on",
     # hobby
     "has hobby": "has_hobby",
+}
+
+
+# Single-valued (functional) predicates: a subject holds at most one active
+# object at a time. Asserting "user lives_in Manhattan" closes the open
+# "user lives_in Brooklyn" version instead of keeping both as current truth.
+SINGLE_VALUED_PREDICATES = {
+    "lives_in",
+    "works_at",
+    "married_to",
+    "has_name",
+    "has_age",
+    "birthday_on",
 }
 
 
@@ -232,9 +245,9 @@ async def create_episode(ep: EpisodeCreate, request: Request):
 @router.post("/facts")
 async def add_graph_fact(fact: GraphFact, request: Request):
     async with connection(request) as conn:
-        await _store_fact_conn(conn, fact)
+        superseded = await _store_fact_conn(conn, fact)
 
-    return {"status": "stored"}
+    return {"status": "stored", "superseded": superseded}
 
 
 async def _upsert_node(
@@ -342,6 +355,11 @@ async def terminate_relationship(req: FactTerminate, request: Request):
     )
     relationship_type = normalize_relation(req.relationship_type)
     subject = _normalize_subject(req.subject)
+    if not relationship_to and not relationship_type:
+        raise HTTPException(
+            422,
+            "Specify relationship_to and/or relationship_type; use DELETE /companion/memory to forget everything",
+        )
 
     async with connection(request) as conn:
         result = await conn.fetchval(
@@ -531,7 +549,7 @@ async def fact_provenance(
               AND ($4::varchar IS NULL OR e.relationship_type = $4)
               AND ($5::varchar IS NULL OR e.target_node_id IN (
                   SELECT node_id FROM companion_graph_nodes
-                  WHERE user_id = $1 AND normalize_name_key = $5
+                  WHERE user_id = $1 AND normalize_name_key = $5 AND subject = $3
               ))
             ORDER BY e.edge_id
             """,
@@ -647,8 +665,10 @@ async def seed_backstory(req: BackstoryRequest, request: Request):
     return {"status": "seeded", "facts_stored": stored, "companion_name": req.name}
 
 
-async def _store_fact_conn(conn, fact: GraphFact) -> None:
-    """Shared fact-storage helper (add_graph_fact body extracted for reuse)."""
+async def _store_fact_conn(conn, fact: GraphFact) -> int:
+    """Shared fact-storage helper (add_graph_fact body extracted for reuse).
+
+    Returns how many prior versions of a single-valued fact were superseded."""
     name = resolve_entity(fact.name)
     relationship_to = (
         resolve_entity(fact.relationship_to) if fact.relationship_to else None
@@ -696,6 +716,21 @@ async def _store_fact_conn(conn, fact: GraphFact) -> None:
             target = await _upsert_node(
                 conn, fact.user_id, relationship_to, "entity", subject=subject
             )
+            superseded = 0
+            if relationship_type in SINGLE_VALUED_PREDICATES:
+                # Close (never delete) the previous value so history stays queryable.
+                closed = await conn.fetch(
+                    """UPDATE companion_graph_edges SET status='INACTIVE',valid_until=clock_timestamp()
+                    WHERE user_id=$1 AND source_node_id=$2 AND relationship_type=$3 AND subject=$4
+                      AND target_node_id<>$5 AND status='ACTIVE'
+                    RETURNING edge_id""",
+                    fact.user_id,
+                    source["node_id"],
+                    relationship_type,
+                    subject,
+                    target["node_id"],
+                )
+                superseded = len(closed)
             # Preserve prior emotional state as a closed version when it changes.
             await conn.execute(
                 """UPDATE companion_graph_edges SET status='INACTIVE',valid_until=clock_timestamp()
@@ -733,6 +768,8 @@ async def _store_fact_conn(conn, fact: GraphFact) -> None:
                     fact.user_id,
                     episode_uuid,
                 )
+            return superseded
+    return 0
 
 
 def _chunk_text(text: str, chunk_size: int = 500) -> list:

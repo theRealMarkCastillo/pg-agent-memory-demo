@@ -385,6 +385,10 @@ def store_companion_fact(
     if relationship_to and relationship_type:
         body["relationship_to"] = relationship_to
         body["relationship_type"] = relationship_type
+    elif relationship_to or relationship_type:
+        raise ValueError(
+            "Pass both relationship_to and relationship_type, or neither for a standalone entity"
+        )
     _post("/companion/facts", body=body)
     return f"Fact stored: {name} ({entity_type}, subject={subject})."
 
@@ -414,10 +418,17 @@ def terminate_companion_relationship(
     subject: str = "user",
 ) -> str:
     """Terminate a relationship in the companion's memory graph when a fact is no
-    longer true (e.g., the user moved away, changed jobs, or ended a goal)."""
+    longer true (e.g., the user moved away, changed jobs, or ended a goal).
+    Narrow the match with relationship_to and/or relationship_type."""
+    if not relationship_to and not relationship_type:
+        # An unfiltered terminate would end every active fact about `name`.
+        raise ValueError(
+            "Specify relationship_to and/or relationship_type; use forget_companion_memory to delete everything"
+        )
     body = {"user_id": user_id, "name": name, "subject": subject}
-    if relationship_to and relationship_type:
+    if relationship_to:
         body["relationship_to"] = relationship_to
+    if relationship_type:
         body["relationship_type"] = relationship_type
     result = _post("/companion/facts/terminate", body=body)
     return f"Relationship terminated: {name} (status: {result.get('status')})."

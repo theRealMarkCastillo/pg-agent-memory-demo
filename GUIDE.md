@@ -77,7 +77,7 @@ A coding assistant that understands a codebase at the symbol level — functions
 
 **Retrieval Strategy**: Hybrid search fused via Reciprocal Rank Fusion (RRF, `k=60`) over `MATERIALIZED` CTEs combining:
 - **Cosine distance** via HNSW index on the `embedding` halfvec column (semantic similarity, gated by `distance <= 0.8`)
-- **Trigram + prefix similarity** via GIN index on `symbol_name` (`symbol_name % $5 OR symbol_name ILIKE $5 || '%'` for fuzzy identifier matching like `"recal"` → `"recall_similar"`)
+- **Trigram + prefix similarity** on `symbol_name` (`symbol_name % $5 OR word_similarity(symbol_name, $5) >= 0.4 OR symbol_name ILIKE $5 || '%'`) for fuzzy identifier matching like `"recal"` → `"recall_similar"`. `similarity()` compares whole strings, so `embed_memory` scores only ~0.13 against *"How do I embed text for semantic search?"*; `word_similarity()` scores the best-matching stretch of the query (~0.46), which keeps the lexical arm useful for natural-language questions. The `%` and prefix forms can use the GIN index; `word_similarity` in this direction is evaluated within the project/branch scope.
 
 **Filtering**: Project + branch isolation ensures the agent doesn't cross-contaminate between different git repositories or feature branches.
 
@@ -194,14 +194,14 @@ An AI tutor that tracks a learner's proficiency across a skill tree, applies a f
 - `tutor_skills`: Nodes in the skill tree with optional `parent_skill_id` for hierarchical relationships (e.g., `calculus` requires `algebra` which requires `math_basics`)
 - `tutor_user_progress`: Per-user proficiency scores (0.0–1.0) with `last_reviewed_at` timestamps
 
-**Retrieval Strategy**: The gap assessment query computes a decayed score using the Ebbinghaus forgetting curve:
+**Retrieval Strategy**: The gap assessment query computes a decayed score using an Ebbinghaus-style exponential forgetting curve with a fixed retention rate:
 
 ```sql
 COALESCE(proficiency_score, 0.0) *
 POWER(0.95, seconds_since_review / 86400.0) AS decayed_score
 ```
 
-This formula models the exponential decay of memory: a skill mastered at 1.0 drops to 0.95 after one day, 0.90 after two days, and approaches 0.0 over time. Skills below 0.5 are classified as "gaps" — the tutor should prioritize these.
+This formula models the exponential decay of memory: a skill mastered at 1.0 drops to 0.95 after one day, 0.90 after two days, and approaches 0.0 over time. Each skill gets one of three statuses: `not_started` (no progress row: never practiced), `gap` (practiced, but the decayed score is below 0.5: learned and then forgotten, or never mastered), or `mastered`. The difference matters pedagogically: a `gap` calls for review, a `not_started` skill calls for first instruction. A recursive CTE walks the skill tree (each skill has at most one parent) to mark a skill `ready` only when every transitive prerequisite is above 0.5.
 
 **Why compute decay in SQL?** Moving the decay computation to the database layer means the agent doesn't need to retrieve all user scores and recalculate. The query returns pre-computed decayed scores, and the agent can focus on pedagogical decisions.
 
@@ -277,7 +277,7 @@ The LangGraph agent uses a **supervisor + Send API fan-out** topology:
 
 1. A `supervisor` node reads the shared blackboard and collects every PENDING task
 2. A conditional edge returns one `Send` per task, dispatching parallel worker nodes
-3. Each `worker` node is a tool-calling agent that claims its assigned task by ID, executes it with real tools, marks it complete, and reports back
+3. Each `worker` node is a tool-calling agent that claims a task, executes it with real tools, marks it complete, and reports back. In `assigned` mode the supervisor pins the task ID (`claim_task`); in `pull` mode (Demo 5) workers are not told which task to take and race `claim_next_task`, so `SKIP LOCKED` actually arbitrates contention. The worker code captures the lease token from the claim result and attaches it on completion. Coordination tokens never round-trip through the LLM
 4. An `aggregate` node merges worker reports (via a reducer) into a final summary and snapshots the blackboard
 
 The workers run concurrently; safe claiming is still enforced at the database layer via `FOR UPDATE SKIP LOCKED`, so a worker can never claim a task that another worker already took.
@@ -299,7 +299,7 @@ An AI companion or personal assistant that maintains a rich, evolving model of i
 
 | Domain | Tables | Persistence | Example |
 |--------|--------|-------------|---------|
-| **Graph (Persistent)** | `companion_graph_nodes`, `companion_graph_edges` | Until explicitly terminated (`valid_until`) | "Alice LIVES_IN Brooklyn" |
+| **Graph (Persistent)** | `companion_graph_nodes`, `companion_graph_edges` | Until terminated or superseded (`valid_until`) | "Alice LIVES_IN Brooklyn" |
 | **Episodic (Persistent)** | `companion_episodes`, `companion_chunks` | Permanent (archival) | "Talked about wanting a 2BR apartment" |
 | **Ephemeral (Transient)** | `companion_ephemerals` | TTL-based expiration | "Feeling excited this week" (expires in 24h) |
 
@@ -312,6 +312,8 @@ An AI companion or personal assistant that maintains a rich, evolving model of i
 - **`shared`** — relationship facts belonging to both ("we SHARE_RITUAL morning coffee", "Vesper TRUSTS Alice"), the memory of the bond growing together.
 
 Because both sides live in one graph, the retrieve node can **cross-reference** user vs self facts on affinity predicates and surface common ground — *"hey, we both like pizza!"*.
+
+**Single-valued facts**: Some predicates hold at most one current object per subject (`lives_in`, `works_at`, `married_to`, `has_name`, `has_age`, `birthday_on`). Storing `user LIVES_IN Manhattan` closes the active `user LIVES_IN Brooklyn` edge (`status='INACTIVE'`, `valid_until=now`) in the same transaction, so conflict resolution does not depend on the LLM remembering to emit a termination, and the old value stays queryable as history. Multi-valued predicates such as `enjoys` accumulate. Supersession is scoped per subject, so the user and the companion can each live somewhere.
 
 **Emotional Scoring + Provenance**: Edges carry `valence` (−1.0…+1.0) and `intensity` (0.0…1.0) so the graph remembers the emotional weight of a fact after the turn ends (a pet's death is `HAS_PET Luna` with `valence=-0.9`). Edges also link to their source episode via `source_episode_id`, enabling provenance queries (`/companion/facts/provenance`) that trace any fact back to where it was inferred.
 

@@ -72,8 +72,7 @@ cp .env.example .env
 # Edit .env with your API credentials
 python tools/configure_auth.py
 make build up
-make seed
-make demo
+make demo   # seeds first; seeding is idempotent and resets the demo companion user
 ```
 
 Once running:
@@ -132,11 +131,12 @@ The runner creates and removes disposable services. Deterministic embeddings tes
 | `test_developer` | 5 | Semantic search ranking, branch isolation, type filter |
 | `test_task` | 5 | Trajectory recall ranking, success_score filter |
 | `test_enterprise` | 6 | RBAC enforcement, RRF scoring, FTS matching |
-| `test_tutor` | 6 | Skill completeness, decay monotonicity, gap threshold |
+| `test_tutor` | 7 | Skill completeness, decay monotonicity, gap vs. not-started classification |
 | `test_swarm` | 7 | SKIP LOCKED concurrency, task lifecycle, no-double-claim |
 | `test_companion` | 20 | Graph facts, self-model, shared facts, backstory, TTL, provenance, valence, user isolation |
 | `test_synthetic` | 10 | Synthetic corpus generation, ground-truth matching, LLM extraction (LLM-gated), common-ground detection |
 | `test_agent_evals` | 8 | Cross-pattern isolation, 20-agent parallel swarm, temporal correctness |
+| `test_followup_regressions` | 9 | Scoped fact termination, single-valued fact supersession, repeatable seeding, swarm pull mode with code-held leases, identifier recall from natural-language queries |
 
 For testing the companion memory with real or synthetic data, see the **`tools/` pipeline** below.
 
@@ -175,7 +175,7 @@ For testing the companion memory with real or synthetic data, see the **`tools/`
 │       ├── task_agent.py       # 3-node graph: recall → agent → tools
 │       ├── enterprise_agent.py # 3-node graph: search → agent → tools
 │       ├── tutor_agent.py      # 3-node graph: assess → agent → tools
-│       ├── swarm_agent.py      # supervisor + Send API fan-out → workers → aggregate
+│       ├── swarm_agent.py      # supervisor + Send API fan-out → workers (assigned or SKIP LOCKED pull) → aggregate
 │       └── companion_agent.py  # retrieve → agent → tools + 3-scope fact extraction node
 ├── tools/
 │   ├── pull_langsmith_traces.py  # Pull top-level LangSmith traces for a project

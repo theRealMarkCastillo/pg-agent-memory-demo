@@ -96,15 +96,23 @@ CREATE INDEX IF NOT EXISTS companion_ephemeral_owner ON companion_ephemerals(use
 CREATE INDEX IF NOT EXISTS companion_chunk_owner ON companion_chunks(user_id);
 
 -- Preserve duplicate source rows before reconciling the current symbol projection on legacy volumes.
-CREATE TABLE IF NOT EXISTS migration_duplicate_symbols AS SELECT * FROM dev_code_symbols WHERE symbol_id IN (
-    SELECT symbol_id FROM (
-        SELECT symbol_id,row_number() OVER(
-            PARTITION BY project_id,git_branch,file_path,symbol_name,symbol_type
-            ORDER BY created_at DESC,symbol_id DESC
-        ) AS rn FROM dev_code_symbols
-    ) d WHERE rn>1
-);
-DELETE FROM dev_code_symbols WHERE symbol_id IN (SELECT symbol_id FROM migration_duplicate_symbols);
+-- The backup table is only created when duplicates actually exist.
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM dev_code_symbols
+        GROUP BY project_id,git_branch,file_path,symbol_name,symbol_type HAVING count(*)>1
+    ) THEN
+        CREATE TABLE IF NOT EXISTS migration_duplicate_symbols AS SELECT * FROM dev_code_symbols WHERE symbol_id IN (
+            SELECT symbol_id FROM (
+                SELECT symbol_id,row_number() OVER(
+                    PARTITION BY project_id,git_branch,file_path,symbol_name,symbol_type
+                    ORDER BY created_at DESC,symbol_id DESC
+                ) AS rn FROM dev_code_symbols
+            ) d WHERE rn>1
+        );
+        DELETE FROM dev_code_symbols WHERE symbol_id IN (SELECT symbol_id FROM migration_duplicate_symbols);
+    END IF;
+END $$;
 
 DO $$ BEGIN
     IF NOT EXISTS (

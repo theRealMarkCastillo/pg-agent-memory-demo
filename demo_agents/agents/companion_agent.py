@@ -227,7 +227,10 @@ async def extract_memory(state: AgentState):
 
         terminated = data.get("terminated_edges", []) or []
         for t in terminated:
-            if not t.get("name"):
+            # Without a target or predicate the engine would end every fact about `name`.
+            if not t.get("name") or not (
+                t.get("relationship_to") or t.get("relationship_type")
+            ):
                 continue
             terminate_res = await client.post(
                 f"{MEMORY_ENGINE_URL}/companion/facts/terminate",

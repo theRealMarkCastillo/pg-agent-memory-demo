@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timezone
 import operator
 from typing import TypedDict, Annotated
@@ -17,6 +18,7 @@ MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 
 class SwarmState(TypedDict):
     workflow_id: str
+    claim_mode: str  # "assigned" (supervisor pins task IDs) | "pull" (workers race via SKIP LOCKED)
     pending_tasks: list[dict]
     worker_task: dict
     agent_name: str
@@ -41,6 +43,22 @@ SPECIALTY_MAP = {
     "extract_entities": "entity-bot",
     "summarize_text": "summary-bot",
 }
+POOL_WORKER = "general-bot"
+
+_CLAIMED = re.compile(r"Task claimed: (?P<name>.+) \(ID: (?P<id>[^)]+)\)")
+_LEASE = re.compile(r"Lease token: (\S+)")
+
+
+def _parse_claim(result: str) -> dict | None:
+    """Capture the claim in code so the lease token never round-trips through the LLM."""
+    claimed, lease = _CLAIMED.search(result), _LEASE.search(result)
+    if not (claimed and lease):
+        return None
+    return {
+        "task_id": claimed["id"],
+        "task_name": claimed["name"],
+        "lease_token": lease.group(1),
+    }
 
 
 async def supervisor_node(state: SwarmState):
@@ -66,10 +84,26 @@ async def supervisor_node(state: SwarmState):
 
 
 def assign_tasks(state: SwarmState):
-    """Fan out one Send per pending task; each Send launches a worker in parallel."""
+    """Fan out one Send per pending task; each Send launches a worker in parallel.
+
+    In "pull" mode the supervisor only sizes the worker pool. Workers are not told
+    which task to take: each one calls claim_next_task, and FOR UPDATE SKIP LOCKED
+    hands every concurrent claimer a different row."""
     pending = state.get("pending_tasks", [])
     if not pending:
         return "aggregate"
+    if state.get("claim_mode") == "pull":
+        return [
+            Send(
+                "worker",
+                {
+                    "workflow_id": state["workflow_id"],
+                    "worker_task": {},
+                    "agent_name": POOL_WORKER,
+                },
+            )
+            for _ in pending
+        ]
     return [
         Send(
             "worker",
@@ -114,13 +148,15 @@ async def worker_node(state: SwarmState):
         "2. Execute the task using execute_shell_command or fetch_url as appropriate.\n"
         "3. Mark it complete with complete_swarm_task and a concise result summary.\n"
         "4. End with a one-line report of what you did.\n"
-        "Do not claim tasks assigned to other workers."
+        "Do not claim tasks assigned to other workers.\n"
+        "The lease token from your claim is attached automatically when you complete."
     )
     messages = [
         SystemMessage(content=system_content),
         HumanMessage(content=f"Process task '{task_name}' now."),
     ]
 
+    claimed = None
     for _ in range(8):
         response = await llm_with_tools.ainvoke(prompt_messages(messages))
         messages.append(response)
@@ -133,16 +169,23 @@ async def worker_node(state: SwarmState):
             else:
                 try:
                     args = bound_args(state, tc["args"])
+                    if tc["name"] in ("claim_task", "claim_next_task") and claimed:
+                        raise ValueError("You already hold a task lease; complete it first")
                     if tc["name"] == "claim_next_task":
                         if task.get("task_id"):
                             raise ValueError("Workers must claim their assigned task")
                         args["workflow_id"] = workflow_id
                         args["agent_name"] = agent_name
-                    if tc["name"] in ("claim_task", "complete_swarm_task") and task.get(
-                        "task_id"
-                    ):
+                    if tc["name"] == "claim_task" and task.get("task_id"):
                         args["task_id"] = task["task_id"]
+                    if tc["name"] == "complete_swarm_task":
+                        if not claimed:
+                            raise ValueError("Claim a task before completing it")
+                        args["task_id"] = claimed["task_id"]
+                        args["lease_token"] = claimed["lease_token"]
                     result = await tool.ainvoke(args)
+                    if tc["name"] in ("claim_task", "claim_next_task"):
+                        claimed = _parse_claim(str(result))
                 except Exception as e:
                     result = f"Tool error: {e}"
             messages.append(
@@ -159,7 +202,8 @@ async def worker_node(state: SwarmState):
             report = m.content
             break
 
-    summary_line = f"[{agent_name}] {task.get('task_name', 'task')}: {report}"
+    done_name = (claimed or task).get("task_name", "no task claimed")
+    summary_line = f"[{agent_name}] {done_name}: {report}"
     return {
         "reports": [summary_line],
         "messages": [AIMessage(content=summary_line)],

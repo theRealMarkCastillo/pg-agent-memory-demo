@@ -80,10 +80,14 @@ async def search_symbols(search: SymbolSearch, request: Request):
                 WHERE project_id=$2 AND git_branch=$3 AND ($4::varchar IS NULL OR symbol_type=$4)
                 ORDER BY embedding <=> $1::halfvec LIMIT 50
             ), lexical AS MATERIALIZED (
-                SELECT symbol_id,similarity(symbol_name,$5) AS score
+                -- similarity() compares whole strings, so an identifier scores ~0.1 against a
+                -- natural-language question. word_similarity(symbol, query) instead scores the
+                -- best-matching stretch of the query ("embed" in "How do I embed text...").
+                SELECT symbol_id,GREATEST(similarity(symbol_name,$5),word_similarity(symbol_name,$5)) AS score
                 FROM dev_code_symbols
                 WHERE project_id=$2 AND git_branch=$3 AND ($4::varchar IS NULL OR symbol_type=$4)
-                  AND (symbol_name % $5 OR symbol_name ILIKE $5 || '%')
+                  AND (symbol_name % $5 OR word_similarity(symbol_name,$5) >= 0.4
+                       OR symbol_name ILIKE $5 || '%')
                 ORDER BY score DESC,symbol_id LIMIT 50
             ), ranks AS (
                 SELECT symbol_id,1.0/(60+row_number() OVER(ORDER BY distance,symbol_id)) AS score
