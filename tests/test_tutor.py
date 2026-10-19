@@ -51,11 +51,14 @@ async def test_gap_threshold_classification(client):
 
 
 @pytest.mark.asyncio
-async def test_unattempted_skill_is_gap(client):
+async def test_unattempted_skill_is_not_started(client):
+    """Never-practiced skills are distinguished from learned-then-forgotten gaps."""
     data = await get(client, f"/tutor/gaps/{USER_ID}")
     stats = next(r for r in data if r["skill_name"] == "statistics")
     assert stats["decayed_score"] == 0.0
-    assert stats["status"] == "gap"
+    assert stats["status"] == "not_started"
+    # Its prerequisite (math_basics, 0.9) is mastered, so it is ready to learn.
+    assert stats["ready"] is True
 
 
 @pytest.mark.asyncio

@@ -33,10 +33,17 @@ async def store_trajectory(traj: TrajectoryStore, request: Request):
     embedding = emb_resp.data[0].embedding
 
     async with pool.acquire() as conn:
-        await conn.execute(
+        # Re-recording an identical episode (e.g. re-running the seed) is a no-op,
+        # so duplicates never crowd the top-k few-shot examples.
+        result = await conn.execute(
             """
             INSERT INTO task_trajectories (agent_id, goal_description, goal_embedding, action_sequence, execution_result, success_score)
-            VALUES ($1, $2, $3::halfvec, $4::jsonb, $5, $6)
+            SELECT $1::varchar, $2::text, $3::halfvec, $4::jsonb, $5::text, $6::real
+            WHERE NOT EXISTS (
+                SELECT 1 FROM task_trajectories
+                WHERE agent_id=$1::varchar AND goal_description=$2::text AND action_sequence=$4::jsonb
+                  AND execution_result=$5::text AND success_score=$6::real
+            )
             """,
             traj.agent_id,
             traj.goal_description,
@@ -46,7 +53,7 @@ async def store_trajectory(traj: TrajectoryStore, request: Request):
             traj.success_score,
         )
 
-    return {"status": "stored"}
+    return {"status": "stored" if result.endswith(" 1") else "duplicate"}
 
 
 @router.post("/trajectories/search")

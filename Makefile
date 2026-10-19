@@ -10,7 +10,8 @@ build:
 	$(COMPOSE) build
 seed:
 	$(COMPOSE) --profile setup run --rm demo-seed
-demo:
+# Seeding is idempotent and resets the demo companion user, so every run starts clean.
+demo: seed
 	$(COMPOSE) run --rm demo-agents
 test:
 	$(PYTHON) tests/run_isolated.py --engine-python $(ENGINE_PYTHON)

@@ -1,11 +1,19 @@
 import asyncio
 import os
+import uuid
 import httpx
 from agents.runtime import auth_headers
 
 MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 SEED_RETRIES = 30
 SEED_RETRY_DELAY = 2
+# Fresh checkpoint threads per run: multi-turn demos share a thread within one run,
+# but a re-run never inherits the previous run's conversation or swarm reports.
+RUN_ID = os.getenv("DEMO_RUN_ID") or uuid.uuid4().hex[:8]
+
+
+def thread(name: str) -> dict:
+    return {"configurable": {"thread_id": f"{name}-{RUN_ID}"}}
 
 
 async def raise_http_error(response):
@@ -55,12 +63,12 @@ async def seed_data(client: httpx.AsyncClient):
         f"{MEMORY_ENGINE_URL}/task/trajectories",
         json={
             "agent_id": "task-bot-2",
-            "goal_description": "Write a Python script in /tmp/agent-workspace to analyze text and count words, then verify it",
+            "goal_description": "Write a Python script in /tmp/agent-workspace to analyze text and count words, then verify it was saved",
             "action_sequence": [
                 {"action": "write_file", "path": "/tmp/agent-workspace/word_count.py"},
-                {"action": "execute_shell_command", "command": "python3 /tmp/agent-workspace/word_count.py"},
+                {"action": "read_file", "path": "/tmp/agent-workspace/word_count.py"},
             ],
-            "execution_result": "Wrote word_count.py to workspace and verified output.",
+            "execution_result": "Wrote word_count.py to workspace and read it back to confirm the contents.",
             "success_score": 0.95,
         },
     )
@@ -163,7 +171,12 @@ async def seed_data(client: httpx.AsyncClient):
         },
     )
 
-    # Pattern 6: Canonical subject -> predicate -> object direction (name="user", relationship_to=<object>)
+    # Pattern 6: start from a clean slate so the demo is repeatable. Demo 6d's forget
+    # disables memory for this user; the seed explicitly forgets and then resumes it.
+    await client.delete(f"{MEMORY_ENGINE_URL}/companion/memory/usr_anthony")
+    await client.post(f"{MEMORY_ENGINE_URL}/companion/memory/usr_anthony/resume")
+
+    # Canonical subject -> predicate -> object direction (name="user", relationship_to=<object>)
     await client.post(
         f"{MEMORY_ENGINE_URL}/companion/facts",
         json={
@@ -283,7 +296,7 @@ async def run_demos():
             "git_branch": "main",
             "query": "How do I embed text for semantic search?",
         },
-        config={"configurable": {"thread_id": "dev-demo-1"}},
+        config=thread("dev-demo"),
     )
     print(f"Symbols Found:\n{result.get('retrieved_symbols', 'N/A')}")
     print(f"Response:\n{_last_assistant_response(result)}")
@@ -294,9 +307,9 @@ async def run_demos():
         {
             "project_id": "demo-project",
             "git_branch": "main",
-            "query": "Write a file called /tmp/agent-workspace/batch_embed.py with a batch_embed function that wraps embed_memory. Then run it with python3 to verify.",
+            "query": "Write a file called /tmp/agent-workspace/batch_embed.py with a batch_embed function that wraps embed_memory. Then read it back with read_file to verify it was saved.",
         },
-        config={"configurable": {"thread_id": "dev-demo-1"}},
+        config=thread("dev-demo"),
     )
     print(f"Response:\n{_last_assistant_response(result2)}")
 
@@ -306,9 +319,9 @@ async def run_demos():
     result = await task_app.ainvoke(
         {
             "agent_id": "task-bot-2",
-            "goal": "Write a Python script to /tmp/agent-workspace that counts words in a sentence, then execute it to verify.",
+            "goal": "Write a Python script to /tmp/agent-workspace that counts words in a sentence, then read it back to verify it was saved.",
         },
-        config={"configurable": {"thread_id": "task-demo-1"}},
+        config=thread("task-demo"),
     )
     print(f"Past Trajectories:\n{result.get('past_trajectories', 'N/A')}")
     print(f"Plan/Result:\n{_last_assistant_response(result)}")
@@ -320,7 +333,7 @@ async def run_demos():
             "agent_id": "task-bot-2",
             "goal": "Fetch https://httpbin.org/json and extract the slide titles from the response.",
         },
-        config={"configurable": {"thread_id": "task-demo-1"}},
+        config=thread("task-demo"),
     )
     print(f"Plan/Result:\n{_last_assistant_response(result2)}")
 
@@ -332,7 +345,7 @@ async def run_demos():
             "user_role": "employee",
             "query": "Can I access customer data?",
         },
-        config={"configurable": {"thread_id": "ent-demo-1"}},
+        config=thread("ent-demo"),
     )
     print(f"Docs Found:\n{result.get('retrieved_docs', 'N/A')}")
     print(f"Response:\n{_last_assistant_response(result)}")
@@ -345,7 +358,7 @@ async def run_demos():
             "user_id": "learner_001",
             "topic": "async programming",
         },
-        config={"configurable": {"thread_id": "tutor-demo-1"}},
+        config=thread("tutor-demo"),
     )
     print(f"Skill Gaps:\n{result.get('skill_gaps', 'N/A')}")
     print(f"Response:\n{_last_assistant_response(result)}")
@@ -357,18 +370,20 @@ async def run_demos():
             "user_id": "learner_001",
             "topic": "async programming review after practice",
         },
-        config={"configurable": {"thread_id": "tutor-demo-1"}},
+        config=thread("tutor-demo"),
     )
     print(f"Response:\n{_last_assistant_response(result2)}")
 
-    print("\n[Demo 5/6] Swarm Agent — Supervisor + Send API Parallel Fan-out")
+    print("\n[Demo 5/6] Swarm Agent — Parallel Workers Pulling from a SKIP LOCKED Queue")
     print("-" * 40)
     swarm_app = await build_swarm_graph_with_checkpointer()
+    # Pull mode: the supervisor only sizes the pool; workers are not told which task
+    # to take. Each races claim_next_task and SKIP LOCKED gives each a different row.
     result = await swarm_app.ainvoke(
-        {"workflow_id": "wf-001"},
-        config={"configurable": {"thread_id": "swarm-demo-1"}},
+        {"workflow_id": "wf-001", "claim_mode": "pull"},
+        config=thread("swarm-demo"),
     )
-    print("Worker Reports (parallel fan-out):")
+    print("Worker Reports (each worker pulled its own task):")
     for r in result.get("reports", []):
         print(f"  {r}")
     print(f"Final Blackboard:\n{result.get('blackboard_state', 'N/A')}")
@@ -381,7 +396,7 @@ async def run_demos():
             "user_id": "usr_anthony",
             "user_message": "How are things looking for my apartment setup?",
         },
-        config={"configurable": {"thread_id": "comp-demo-1"}},
+        config=thread("comp-demo"),
     )
     print(f"Retrieved Context:\n{result.get('retrieved_context', 'N/A')}")
     print(f"Response:\n{_last_assistant_response(result)}")
@@ -393,7 +408,7 @@ async def run_demos():
             "user_id": "usr_anthony",
             "user_message": "I also started getting into poetry recently — I really enjoy poetry. Can you remember that?",
         },
-        config={"configurable": {"thread_id": "comp-demo-1"}},
+        config=thread("comp-demo"),
     )
     print(f"Response:\n{_last_assistant_response(result2)}")
     print(f"Extracted Memories:\n{result2.get('extracted_facts', 'N/A')}")
@@ -405,7 +420,7 @@ async def run_demos():
             "user_id": "usr_anthony",
             "user_message": "I no longer live in Brooklyn — I moved and I live in Manhattan now.",
         },
-        config={"configurable": {"thread_id": "comp-demo-1"}},
+        config=thread("comp-demo"),
     )
     print(f"Response:\n{_last_assistant_response(result3)}")
     print(f"Extracted Memories:\n{result3.get('extracted_facts', 'N/A')}")
@@ -429,16 +444,35 @@ async def run_demos():
         )
         print(f"  - {f['name']} ({f['entity_type']}){rel} [salience={f['salience']}]")
 
-    print("\n[Demo 6d] Companion — Right to Forget")
+    print("\n[Demo 6d] Companion — Right to Forget (deletes ALL memory for this user)")
     print("-" * 40)
     result4 = await companion_app.ainvoke(
         {
             "user_id": "usr_anthony",
-            "user_message": "Please forget everything you remember about my apartment search.",
+            "user_message": "Please forget everything you remember about me.",
         },
-        config={"configurable": {"thread_id": "comp-demo-1"}},
+        config=thread("comp-demo"),
     )
     print(f"Response:\n{_last_assistant_response(result4)}")
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        headers=auth_headers(),
+        event_hooks={"response": [raise_http_error]},
+    ) as client:
+        state = (
+            await client.get(f"{MEMORY_ENGINE_URL}/companion/memory/usr_anthony/state")
+        ).json()
+        left = (
+            await client.get(
+                f"{MEMORY_ENGINE_URL}/companion/context",
+                params={"user_id": "usr_anthony"},
+            )
+        ).json()
+    print(
+        f"Memory enabled: {state['enabled']} (generation {state['generation']}); "
+        f"user facts left: {len(left.get('graph_facts', []))}"
+    )
+    print("(`make seed` explicitly resumes memory, so the demo can be run again.)")
 
     print("\n" + "=" * 60)
     print(

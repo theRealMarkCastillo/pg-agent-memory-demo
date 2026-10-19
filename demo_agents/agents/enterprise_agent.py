@@ -88,19 +88,9 @@ async def agent_node(state: AgentState):
             turn_has_tool_output = True
             break
 
-    try:
-        response = await llm_with_tools.ainvoke(prompt_messages(messages))
-    except Exception:
-        if not state.get("retrieved_docs") and not turn_has_tool_output:
-            return {
-                "messages": [
-                    AIMessage(
-                        content="No current authorized policy matches this query. Please clarify the policy you need."
-                    )
-                ]
-            }
-        raise
+    response = await llm_with_tools.ainvoke(prompt_messages(messages))
 
+    # Grounding guard: never let an ungrounded final answer through.
     if getattr(response, "tool_calls", None):
         return {"messages": [response]}
     if not state.get("retrieved_docs") and not turn_has_tool_output:

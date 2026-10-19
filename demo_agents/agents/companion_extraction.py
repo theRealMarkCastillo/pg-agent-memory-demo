@@ -58,7 +58,7 @@ Rules:
   - Match the verb: "I enjoy hiking" -> ENJOYS. "I love sushi" -> LOVES. "I play guitar" -> PLAYS. "I live in Seattle" -> LIVES_IN. "I'm a software developer" -> HAS_JOB. "My wife Sarah is a nurse" -> MARRIED_TO (relationship_to="Sarah"). "I have a cat named Luna" -> HAS_PET (relationship_to="Luna"). "I want to learn Japanese" -> WANTS_TO (relationship_to="learn Japanese"). "I used to work at Google" -> WORKED_AT. "I hate spiders" -> HATES. "I'm allergic to peanuts" -> ALLERGIC_TO. "I'm vegetarian" -> DIETARY_RESTRICTION.
   - TEMPORAL: extract CURRENT state. Past jobs use WORKED_AT, current use WORKS_AT.
 - VALENCE & INTENSITY: valence reflects emotional tone (-1 very sad/loss, +1 joyful); intensity how strongly felt (0..1). Pet dying -> valence -0.9 intensity 0.9. New job -> +0.6/0.5. Neutral -> 0/0.3.
-- terminated_edges: relationships that are NO LONGER true. Always include subject: user for user facts, self for companion facts, shared for relationship facts. Never guess an omitted scope.
+- terminated_edges: relationships that are NO LONGER true. Always include subject: user for user facts, self for companion facts, shared for relationship facts. Never guess an omitted scope. Always give relationship_to and/or relationship_type so only that fact ends.
 - If nothing meaningful in a category, return an empty list for it.
 """
 )

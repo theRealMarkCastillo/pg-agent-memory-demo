@@ -83,8 +83,11 @@ async def find_skill_gaps(user_id: str, request: Request):
         rows = await conn.fetch(
             """
             WITH RECURSIVE skill_with_decay AS (
-                -- Ebbinghaus exponential forgetting curve: score * 0.95^(days_elapsed)
+                -- Ebbinghaus-style exponential forgetting: score * 0.95^(days_elapsed).
+                -- A fixed retention rate; a full spaced-repetition model would grow
+                -- stability with each successful review.
                 SELECT s.skill_id, s.skill_name, s.parent_skill_id,
+                       up.progress_id IS NOT NULL AS attempted,
                        COALESCE(up.proficiency_score, 0.0) *
                        POWER(0.95, EXTRACT(EPOCH FROM (clock_timestamp() - COALESCE(up.last_reviewed_at, clock_timestamp()))) / 86400.0)
                        AS decayed_score
@@ -92,7 +95,7 @@ async def find_skill_gaps(user_id: str, request: Request):
                 LEFT JOIN tutor_user_progress up ON s.skill_id = up.skill_id AND up.user_id = $1
             ),
             ancestors AS (
-                -- Recursive DAG traversal: collect all transitive prerequisites for each skill
+                -- Recursive tree traversal (one parent per skill): collect all transitive prerequisites
                 SELECT skill_id AS child_id, parent_skill_id AS ancestor_id
                 FROM tutor_skills
                 WHERE parent_skill_id IS NOT NULL
@@ -103,7 +106,9 @@ async def find_skill_gaps(user_id: str, request: Request):
                 WHERE s.parent_skill_id IS NOT NULL
             )
             SELECT d.skill_name, d.decayed_score, p.skill_name AS prerequisite,
-                   CASE WHEN d.decayed_score < 0.5 THEN 'gap' ELSE 'mastered' END AS status,
+                   CASE WHEN NOT d.attempted THEN 'not_started'
+                        WHEN d.decayed_score < 0.5 THEN 'gap'
+                        ELSE 'mastered' END AS status,
                    NOT EXISTS(
                        SELECT 1 FROM ancestors a
                        JOIN skill_with_decay x ON x.skill_id = a.ancestor_id

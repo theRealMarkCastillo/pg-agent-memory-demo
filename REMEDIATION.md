@@ -2,7 +2,8 @@
 
 The review findings are covered by API, graph, database, and pipeline regressions in
 `tests/test_review_regressions.py`, `tests/test_agent_regressions.py`, and
-`tests/test_pipeline_regressions.py`, and `tests/test_followup_regressions.py`. Existing integration tests now run against
+`tests/test_pipeline_regressions.py`, `tests/test_followup_regressions.py`, and
+`tests/test_main_sync_regressions.py`. Existing integration tests now run against
 fresh data per test, and assert real outcomes instead of accepting empty results.
 
 ## Start or upgrade

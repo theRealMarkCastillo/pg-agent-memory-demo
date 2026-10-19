@@ -17,6 +17,7 @@ MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 
 class SwarmState(TypedDict):
     workflow_id: str
+    claim_mode: str  # "assigned" (supervisor pins task IDs) | "pull" (workers race via SKIP LOCKED)
     pending_tasks: list[dict]
     worker_task: dict
     agent_name: str
@@ -44,6 +45,7 @@ SPECIALTY_MAP = {
     "extract_entities": "entity-bot",
     "summarize_text": "summary-bot",
 }
+POOL_WORKER = "general-bot"
 
 
 async def supervisor_node(state: SwarmState):
@@ -69,10 +71,26 @@ async def supervisor_node(state: SwarmState):
 
 
 def assign_tasks(state: SwarmState):
-    """Fan out one Send per pending task; each Send launches a worker in parallel."""
+    """Fan out one Send per pending task; each Send launches a worker in parallel.
+
+    In "pull" mode the supervisor only sizes the worker pool. Workers are not told
+    which task to take: each one calls claim_next_task, and FOR UPDATE SKIP LOCKED
+    hands every concurrent claimer a different row."""
     pending = state.get("pending_tasks", [])
     if not pending:
         return "aggregate"
+    if state.get("claim_mode") == "pull":
+        return [
+            Send(
+                "worker",
+                {
+                    "workflow_id": state["workflow_id"],
+                    "worker_task": {},
+                    "agent_name": POOL_WORKER,
+                },
+            )
+            for _ in pending
+        ]
     return [
         Send(
             "worker",

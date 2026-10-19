@@ -20,8 +20,7 @@ Edit `.env` and provide your API credentials. The stack works with any OpenAI-co
 ```bash
 python tools/configure_auth.py
 make build up
-make seed
-make demo
+make demo   # runs `make seed` first
 ```
 
 On first run Docker builds both service images. Subsequent runs are faster — use `docker compose up` without `--build` unless code changes.
@@ -37,7 +36,7 @@ Open http://localhost:8001/docs for the Swagger UI.
 
 ## Run Demos
 
-Run `make demo` after `make seed`. The Compose runner leaves shell execution disabled; configure the local Docker sandbox explicitly for shell demos. See [REMEDIATION.md](REMEDIATION.md) for authentication, migrations, and test environments. It runs **12 demos**: the 6 base patterns plus 6 multi-turn and real execution demos (shell commands, HTTP requests, file operations). View output:
+`make demo` runs `make seed` first. Seeding is idempotent: it forgets and explicitly resumes the demo companion user (Demo 6d disables that user's memory), skips duplicate trajectories, and each run uses fresh checkpoint threads, so the demo can be re-run without `make clean`. The Compose runner leaves shell execution disabled, so the demos verify files with `read_file` instead of running them; configure the local Docker sandbox explicitly for shell execution. See [REMEDIATION.md](REMEDIATION.md) for authentication, migrations, and test environments. It runs **12 demos**: the 6 base patterns plus 6 multi-turn and real execution demos (shell commands, HTTP requests, file operations). View output:
 
 ```bash
 docker logs -f demo-agent-runner
@@ -54,17 +53,17 @@ docker compose restart demo-agents
 | # | Pattern | Type |
 |---|---------|------|
 | 1 | Developer | Symbol search + write-back |
-| 1b | Developer | Multi-turn: writes and executes a Python file |
-| 2 | Task | Trajectory recall + real shell execution |
+| 1b | Developer | Multi-turn: writes a Python file and reads it back |
+| 2 | Task | Trajectory recall (low-score run filtered out) + file write/verify |
 | 2b | Task | Multi-turn: fetches a real URL (httpbin.org) |
 | 3 | Enterprise | Role-filtered policy search + write-back |
 | 4 | Tutor | Skill gap assessment + progress update |
 | 4b | Tutor | Multi-turn: after-learning progress update |
-| 5 | Swarm | Supervisor + Send API parallel fan-out (2 workers) |
+| 5 | Swarm | Pull mode: parallel workers race `claim_next_task`; SKIP LOCKED gives each a different task |
 | 6 | Companion | Relational context recall + write-back |
 | 6b | Companion | Multi-turn: remembers previous conversation |
-| 6c | Companion | Conflict resolution: auto-terminates stale facts |
-| 6d | Companion | Right to forget |
+| 6c | Companion | Conflict resolution: `lives_in Manhattan` supersedes `lives_in Brooklyn` in the engine |
+| 6d | Companion | Right to forget: deletes all memory for the user and disables recording until resumed |
 
 ## Tear Down
 
@@ -161,6 +160,8 @@ The Swarm agent uses a supervisor + Send API topology instead:
 ```
 supervisor → [Send per pending task] → worker (claim → execute → complete) → aggregate → END
 ```
+
+With `claim_mode="assigned"` the supervisor pins each worker to a task ID. With `claim_mode="pull"` (used by Demo 5) workers get no task ID and call the claim-next endpoint, so `FOR UPDATE SKIP LOCKED` decides who gets which row. In both modes application code claims before invoking the model, holds the lease token, and validates it before each tool dispatch; the LLM never copies it.
 
 | Pattern | Entry Node | Tools | Checkpointer |
 |---------|-----------|-------|-------------|
