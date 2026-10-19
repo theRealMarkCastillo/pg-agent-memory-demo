@@ -1,0 +1,61 @@
+{
+  "cli_version": "0.11.4",
+  "checkpoint_id": "01M58VJGX455M4NSY2Q0F1QEX5",
+  "session_id": "01a141a8-50e5-74f1-b43a-d06cfc3b06d2",
+  "strategy": "manual-commit",
+  "created_at": "2026-10-19T01:14:18.773443Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "GUIDE.md",
+    "Makefile",
+    "README.md",
+    "REMEDIATION.md",
+    "RUNBOOK.md",
+    "demo_agents/agents/companion_agent.py",
+    "demo_agents/agents/companion_extraction.py",
+    "demo_agents/agents/enterprise_agent.py",
+    "demo_agents/agents/swarm_agent.py",
+    "demo_agents/agents/tools.py",
+    "demo_agents/main.py",
+    "memory_engine/migrations/001_review_fixes.sql",
+    "memory_engine/routers/companion.py",
+    "memory_engine/routers/developer.py",
+    "memory_engine/routers/task_agent.py",
+    "memory_engine/routers/tutor.py",
+    "tests/test_main_sync_regressions.py",
+    "tests/test_tutor.py"
+  ],
+  "agent": "Codex",
+  "model": "gpt-6-astra",
+  "turn_id": "663628606b54",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 134835,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 993664,
+    "output_tokens": 3707,
+    "api_call_count": 22
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-10-19T01:14:18.761523Z",
+    "agent_lines": 486,
+    "agent_removed": 83,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 486,
+    "total_lines_changed": 569,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
