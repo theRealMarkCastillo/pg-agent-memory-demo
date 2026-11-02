@@ -105,6 +105,15 @@ EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
 LLM_MODEL_NAME=llama3.1
 ```
 
+For local CPU embeddings without an embedding API:
+```ini
+EMBEDDING_PROVIDER=local                     # Default: remote
+EMBEDDING_MODEL_NAME=BAAI/bge-small-en-v1.5  # Any sentence-transformers model up to 1536 dims
+EMBEDDING_REVISION=                          # Optional Hugging Face commit to pin
+```
+
+Run `make build` after changing these: the model is downloaded into the image because the engine container's filesystem is read-only. The engine runs it in-process on CPU and zero-pads vectors to 1536 dimensions, which leaves cosine similarity and the schema unchanged. Remote and local vectors are not comparable. Companion memory refuses mixed vector spaces with a 409; the developer, task and enterprise tables have no such check. Switch providers only on a fresh database (`make clean`, then `make up` and `make seed`).
+
 Optional — LangSmith access for the trace tooling (`tools/`):
 ```ini
 LANGSMITH_API_KEY=ls-...       # smith.langchain.com API key
