@@ -1,456 +1,275 @@
-# Agent Memory Patterns: A Taxonomy and Implementation Guide
+# Agent Memory: Storage, Context, and Control Flow
 
-## Table of Contents
-1. [The Memory Problem in AI Agents](#the-memory-problem-in-ai-agents)
-2. [A Taxonomy of Agent Memory](#a-taxonomy-of-agent-memory)
-3. [Pattern 1: Developer Workspace Memory](#pattern-1-developer-workspace-memory)
-4. [Pattern 2: Autonomous Task Memory](#pattern-2-autonomous-task-memory)
-5. [Pattern 3: Enterprise Knowledge Memory](#pattern-3-enterprise-knowledge-memory)
-6. [Pattern 4: Adaptive Tutor Memory](#pattern-4-adaptive-tutor-memory)
-7. [Pattern 5: Multi-Agent Swarm Memory](#pattern-5-multi-agent-swarm-memory)
-8. [Pattern 6: Relational Companion Memory](#pattern-6-relational-companion-memory)
-9. [Comparative Analysis](#comparative-analysis)
-10. [LangGraph Integration Analysis](#langgraph-integration-analysis)
-11. [Going Further: Production Considerations](#going-further-production-considerations)
+This guide explains the implementation in this repository and how to evaluate it. The baseline was checked on October 24, 2026: LangGraph 1.2.17, LangChain Core 1.7.0, OpenAI integration 1.7.2, Checkpoint 4.3.0, and PostgreSQL saver 3.2.0. Exact pins are in [requirements](demo_agents/requirements.txt).
 
----
+The six examples cover memory **and coordination**. They are useful building blocks, not a complete taxonomy of cognition or a production certification. Current behavior below is grounded in source and regression tests. [Six additional workflows](USE_CASES.md) now implement approval, evidence, procedure promotion, timelines, research, and analytics in a separate extension host.
 
-## The Memory Problem in AI Agents
+## Contents
 
-### Why Agent Memory Matters
+1. [The memory problem in AI agents](#the-memory-problem-in-ai-agents)
+2. [A taxonomy of agent memory](#a-taxonomy-of-agent-memory)
+3. [Workshop path](#workshop-path)
+4. [Pattern 1: Developer workspace memory](#pattern-1-developer-workspace-memory)
+5. [Pattern 2: Autonomous task memory](#pattern-2-autonomous-task-memory)
+6. [Pattern 3: Enterprise knowledge memory](#pattern-3-enterprise-knowledge-memory)
+7. [Pattern 4: Adaptive tutor memory](#pattern-4-adaptive-tutor-memory)
+8. [Pattern 5: Multi-agent swarm memory](#pattern-5-multi-agent-swarm-memory)
+9. [Pattern 6: Relational companion memory](#pattern-6-relational-companion-memory)
+10. [LangGraph integration analysis](#langgraph-integration-analysis)
+11. [Evaluation layers](#evaluation-layers)
+12. [Going further: Production considerations](#going-further-production-considerations)
+13. [Primary references](#primary-references)
 
-Modern AI agents face a fundamental challenge: LLMs are stateless. Every inference call is independent, bounded by a context window (typically 4K–128K tokens), and loses all information from previous interactions. This creates three problems:
+## The memory problem in AI agents
 
-1. **Continuity Gap**: Agents cannot persist user context, preferences, or conversation history across sessions.
-2. **Knowledge Decay**: Agents cannot remember what they learned from prior successes or failures.
-3. **Scalability Wall**: Embedding all relevant history in every prompt saturates context windows and degrades output quality with noise.
+A model request operates on supplied context. Persistence, retrieval, and memory updates are application responsibilities even when an API offers conversation state. Reusing a recorded trajectory provides an example to the next request; it does not update model weights. Likewise, storing a generated assertion does not make it true.
 
-Agent memory systems address these by externalizing state into a persistent store and providing retrieval mechanisms that return precisely the information needed for the current interaction. This project implements six distinct memory patterns, each addressing a different agent archetype's memory requirements.
+A useful memory design answers five questions:
 
-### What This Project Is — And What It Is Not
+1. **What is the record?** A source document, observed event, user assertion, model extraction, or verified result?
+2. **Who owns it?** Which user, role, project, branch, workflow, and application principal can access or change it?
+3. **When is it valid?** Current, superseded, expired, or historical?
+4. **How does it enter context?** Which eligibility filters, candidate retrieval, ranking, and prompt budget apply?
+5. **How can it be corrected or removed?** Which source records, derived vectors, checkpoints, exports, and backups are affected?
 
-**This project is** a reference implementation demonstrating how the same underlying infrastructure (PostgreSQL with pgvector and pg_trgm) can support six fundamentally different memory architectures. It runs as a self-contained Docker stack that you can inspect, modify, and benchmark. Agents use **tool calling** (LangGraph `ToolNode`) for both retrieving and writing back to memory, **real execution tools** (shell, HTTP, file operations), and a **Postgres checkpointer** for persistent multi-turn conversations.
+The repository implements parts of this lifecycle. It also makes important gaps visible: extraction is fallible, prompt construction is character-bounded rather than token-aware, and external effects are not exactly-once.
 
-**This project is not** a production-grade agent framework. The LangGraph agents are intentionally focused on memory patterns — most use a 3-node tool-calling graph (retrieve → agent → tools) rather than deep hierarchies, and the Companion adds a fourth 3-scope extraction node. A production system would add sub-agent orchestration (supervisor/worker with Send API), context window management, and conditional routing for edge cases.
+## A taxonomy of agent memory
 
----
+Separate these concerns before choosing a database or agent framework:
 
-## A Taxonomy of Agent Memory
+| Concern | Scope and lifetime | Implementation here | Key distinction |
+|---------|--------------------|---------------------|-----------------|
+| Run context | One invocation | Frozen `AgentContext` passed through LangGraph `Runtime` | Application-provided scope; not inferred from a model's arguments |
+| Working state | Graph steps and a conversation thread | `MessagesState`, pattern-specific state, PostgreSQL checkpoints | Stored history can outlive the smaller prompt actually sent to a model |
+| Semantic/domain memory | Across threads | Symbols, policy documents, graph assertions | Requires eligibility, freshness, and source interpretation |
+| Episodic memory | Across interactions | Task trajectories and companion episodes/chunks | An account of an event; outcome quality depends on its evidence |
+| Procedural memory | Reusable instructions | Trajectories can be retrieved as examples | The extension checker gates versioned promotion; the original trajectory agent still uses supplied scores |
+| Temporary context | Until a deadline | Companion ephemerals with `expires_at` | Filtering expired records is different from physically deleting them |
+| Coordination state | Task lifecycle | Blackboard rows and expiring leases | A queue claim is not a user memory or a guarantee of external execution |
 
-Agent memory can be categorized along two axes: **temporal scope** and **structural complexity**.
+The [LangGraph persistence documentation](https://docs.langchain.com/oss/python/langgraph/persistence) distinguishes thread checkpoints from cross-thread stores. This demo uses a domain API for long-term memory instead of a LangGraph Store: relational constraints, access checks, provenance, and specialized queries live behind that API.
 
-| Temporal Scope | Description | Examples |
-|----------------|-------------|----------|
-| **Working** | Transient, conversation-scoped | Current task, recent messages |
-| **Short-term** | Session-scoped, expires | Ephemeral moods, active blackboard tasks |
-| **Long-term** | Persistent, accumulates over time | User facts, learned skills, codebase symbols |
-| **Archival** | Immutable, auditable | Policy documents, trajectory logs |
+The six patterns are composable. A support assistant might combine policy retrieval, customer assertions, case episodes, and a workflow checkpoint without introducing four separate agents.
 
-| Structural Complexity | Description | Examples |
-|------------------------|-------------|----------|
-| **Flat** | Key-value or unlabeled chunks | Episodic text chunks, raw vectors |
-| **Graph** | Entities with typed relationships | Knowledge graphs, skill trees |
-| **Temporal** | Time-versioned or decaying | Forgetting curves, bitemporal facts |
-| **Access-controlled** | Role-gated with audit trails | Enterprise policies, RBAC documents |
+## Workshop path
 
-The six patterns in this project span this taxonomy:
+Read [operating contracts](REMEDIATION.md) and [launch instructions](RUNBOOK.md) first. Use the disposable runner for deterministic work:
 
-| Pattern | Temporal Scope | Structural Complexity | Primary DB Mechanism |
-|---------|---------------|----------------------|---------------------|
-| Developer Workspace | Long-term | Flat + Vector | HNSW + pg_trgm |
-| Autonomous Task | Long-term + Archival | Flat + Metadata | HNSW + score filter |
-| Enterprise Knowledge | Long-term + Archival | Access-controlled + Flat | RRF (vector + FTS) + role gate |
-| Adaptive Tutor | Long-term | Graph + Temporal | Skill tree + decay SQL |
-| Multi-Agent Swarm | Short-term | Flat + Locked | FOR UPDATE SKIP LOCKED |
-| AI Companion | Long-term + Short-term | Graph + Temporal | Versioned facts + TTL |
+```bash
+make test PYTHON=.venv-tests/bin/python ENGINE_PYTHON=.venv-engine/bin/python
+```
 
----
+This starts a disposable PostgreSQL instance and engine, supplies fixture embeddings, and removes its services afterward. It does not load the project's `.env` or call the configured chat model. A standalone `pytest` command is not equivalent: many tests require the runner's database, engine, and generated credentials.
 
-## Pattern 1: Developer Workspace Memory
+For the live demonstrations, configure a tool-capable chat model and an embedding endpoint matching `halfvec(1536)`, generate credentials, and run:
 
-### Use Case
-A coding assistant that understands a codebase at the symbol level — functions, classes, methods, their signatures, and their semantic purpose. It must retrieve relevant code across branches and projects, tolerate partial queries and typos, and rank results by relevance.
+```bash
+make build up
+make demo
+```
 
-### Memory Architecture
+The seed uses an admin credential, resets the demo companion user, and explicitly resumes that user's memory. Each run gets fresh thread IDs. Demo 6d deletes the demo user's companion memory and disables future companion recording. Use a disposable demo dataset for the workshop.
 
-**Storage**: The `dev_code_symbols` table stores each code symbol as a row with project/git-branch metadata, a human-readable signature, and the symbol's semantic description encoded as a `halfvec(1536)` embedding.
+| Lab | Inspect or run | Expected observation | Failure to discuss |
+|-----|----------------|----------------------|--------------------|
+| 1. Separate state from memory | Developer demos 1/1b; [runtime](demo_agents/agents/runtime.py), [developer graph](demo_agents/agents/developer_agent.py) | One thread retains conversation; retrieval refreshes the system message each turn | A new thread has no old dialogue but can still retrieve the same authorized domain records |
+| 2. Compare retrieval arms | [Developer router](memory_engine/routers/developer.py), [lexical regression](tests/test_main_sync_regressions.py) | A natural-language identifier query can match through the lexical arm | Similarity and RRF scores are not calibrated confidence probabilities |
+| 3. Trace authorization | [Enterprise graph](demo_agents/agents/enterprise_agent.py), `test_scope_bound_through_actual_tool_node` in [agent regressions](tests/test_agent_regressions.py) | A model's forged admin role is overwritten; the engine checks caller permissions | A system prompt is not an access-control boundary |
+| 4. Observe contention | Demo 5; [swarm graph](demo_agents/agents/swarm_agent.py) and [router](memory_engine/routers/swarm.py) | Pull-mode workers claim separate queue rows and completion checks leases | A worker can crash after an external effect and before recording completion |
+| 5. Correct and forget | Demos 6c/6d; [companion tests](tests/test_agent_regressions.py) | Moving cities closes the prior single-valued assertion; forgetting also purges companion checkpoint threads | Other domains, extension files, hook excerpts, exports, and backups have separate lifecycles |
+| 6. Recover and bound work | [V1 tests](tests/test_langgraph_v1.py) | Saved parallel `Send` payloads resume after rebuilding the native graph; excessive cycles raise `GraphRecursionError` | The test is not a full process-crash or old-version checkpoint migration test |
+| 7. Evaluate the result | [Evaluation layers](#evaluation-layers), [trace tooling](README.md#memory-testing-pipeline-tools) | Separate storage correctness, extraction agreement, retrieval metrics, and answer quality | Passing synthetic fixtures does not establish provider quality |
 
-**Retrieval Strategy**: Hybrid search fused via Reciprocal Rank Fusion (RRF, `k=60`) over `MATERIALIZED` CTEs combining:
-- **Cosine distance** via HNSW index on the `embedding` halfvec column (semantic similarity, gated by `distance <= 0.8`)
-- **Trigram + prefix similarity** on `symbol_name` (`symbol_name % $5 OR word_similarity(symbol_name, $5) >= 0.4 OR symbol_name ILIKE $5 || '%'`) for fuzzy identifier matching like `"recal"` → `"recall_similar"`. `similarity()` compares whole strings, so `embed_memory` scores only ~0.13 against *"How do I embed text for semantic search?"*; `word_similarity()` scores the best-matching stretch of the query (~0.46), which keeps the lexical arm useful for natural-language questions. The `%` and prefix forms can use the GIN index; `word_similarity` in this direction is evaluated within the project/branch scope.
+A useful learner deliverable is a short record of the input, authorized scope, retrieved record IDs, tool results, final answer, and what the checks actually established. Avoid grading success by how confident the answer sounds.
 
-**Filtering**: Project + branch isolation ensures the agent doesn't cross-contaminate between different git repositories or feature branches.
+## Pattern 1: Developer workspace memory
 
-**Why SQL and not a vector database?** For developer tools, the metadata filtering (project, branch, symbol type) is as important as the vector search. PostgreSQL lets you combine `WHERE project_id = $1 AND git_branch = $2` with `ORDER BY embedding <=> $3` in a single query, eliminating the need for a separate metadata store.
+**Outcome:** find relevant symbols within an authorized project and branch, then optionally inspect or write workspace files.
 
-### Compare and Contrast
+`dev_code_symbols` stores symbol identity, path, signature, content, and a `halfvec(1536)` embedding. Identity is project + branch + file + symbol name + symbol type. Reconciliation can replace a file's symbols and remove renamed/deleted entries; a symbol index is not automatically kept current by the graph.
 
-| Approach | Strength | Weakness | When to Use |
-|----------|----------|----------|-------------|
-| **pg_trgm + HNSW (this project)** | Combined symbolic + semantic search in one query; no external service | Trgm threshold must be tuned per use case; halfvec trades precision for speed | Small-to-medium codebases (<10K symbols) where SQL-native ops suffice |
-| **Dedicated vector DB (Pinecone/Weaviate/Qdrant)** | Better recall at scale (>1M vectors); built-in re-ranking | Separate service adds complexity; metadata filtering can be limited | Large monorepos with millions of symbols |
-| **Full LLM context dump** | Zero infrastructure; trivial to implement | Context window exhaustion; high token costs; no persistence across sessions | Prototypes and throwaway scripts |
-| **RAG with chunked source files** | Captures surrounding context; good for "how does this work" questions | Poor for "which function does X" type symbol-level queries | Documentation Q&A, code explanation |
+The [retrieval query](memory_engine/routers/developer.py) combines semantic and lexical candidates with RRF (`k=60`). Each arm retrieves up to 50 candidates and the fused query returns up to 10. The lexical arm combines trigram, `word_similarity`, and prefix matching; a whole-string similarity alone performs poorly when a short identifier is compared with a full question. Project, branch, and optional symbol type constrain retrieval.
 
-### Agent Implementation
+The [graph](demo_agents/agents/developer_agent.py) runs `search → agent → tools → agent`, ending when the model returns no tool calls. Available tools are `search_code_symbols`, `store_code_symbol`, `execute_shell_command`, `read_file`, and `write_file`. Shell execution remains disabled in the Compose runner.
 
-The LangGraph agent uses a **3-node tool-calling graph**: `search_code_symbols` → `agent` → `tools` (with conditional loop back to agent). The search node retrieves relevant symbols, the agent node invokes the LLM with bound tools, and the tools node executes tool calls. The LLM can choose to:
+**Boundary:** the demo is symbol retrieval and scoped file tooling, not an AST indexer, dependency-aware code navigator, or proof of correct code generation. Evaluate identifier recall, branch isolation, stale-symbol removal, and end-to-end task correctness separately. Choose between source chunks and symbols based on the query; neither representation universally dominates.
 
-- Answer directly based on retrieved symbols
-- Call `search_code_symbols` again with different parameters
-- Call `store_code_symbol` to persist a new symbol (write-back)
-- Call `read_file`, `write_file`, or `execute_shell_command` for real file and shell operations
+## Pattern 2: Autonomous task memory
 
-**Tools available**: `search_code_symbols`, `store_code_symbol`, `execute_shell_command`, `read_file`, `write_file`
+**Outcome:** retrieve comparable task attempts and use them as context for a bounded execution attempt.
 
-**What changed from the original**: The agent now supports bidirectional memory (write-back), real file/shell execution, and multi-turn conversations via the Postgres checkpointer.
+`task_trajectories` contains a goal embedding, JSON action sequence, result, and supplied score. The [query](memory_engine/routers/task_agent.py) filters by caller-authorized agent scope, a minimum score (default 0.7), and similarity, returning up to five trajectories. A threshold selects records with reported high scores; it does not independently verify them.
 
----
+The [graph](demo_agents/agents/task_agent.py) runs `recall → agent → tools → agent`. Tools include trajectory search/store, allowlisted HTTP, workspace files, and opt-in sandboxed shell execution. Demo 2 writes a script and reads it back; this verifies the file contents were saved, not that the script executed successfully.
 
-## Pattern 2: Autonomous Task Memory
+**Boundary:** the model can propose a trajectory score. No independent grader promotes a trajectory to a trusted procedure, and recall does not train the model. Failures can also be useful evidence; a production design may retain failure reasons and environment versions rather than simply excluding them. [Verified procedural memory](USE_CASES.md#3-verified-procedural-memory) implements that distinction in a separate, bounded CSV-to-JSON example.
 
-### Use Case
-An agent that autonomously executes multi-step tasks (web scraping, report generation, data pipeline orchestration). When given a new goal, it should recall how it succeeded at similar goals in the past, adapt those strategies, and actually execute them.
+## Pattern 3: Enterprise knowledge memory
 
-### Memory Architecture
+**Outcome:** retrieve eligible current policies for an authenticated principal and abstain when there is no supporting policy evidence.
 
-**Storage**: The `task_trajectories` table logs completed task executions as serialized action sequences (`JSONB`), the original goal description, an embedding of the goal for similarity search, the execution result, and a success score (0.0–1.0).
+`enterprise_documents` stores document content, role eligibility, ACTIVE/ARCHIVED state, validity intervals, vectors, and a full-text index. The [router](memory_engine/routers/enterprise.py) checks the caller's authorized role and applies eligibility to both the vector and lexical arms before fusing ranks. RRF combines ranks from different score scales; its candidate limits and thresholds still need workload evaluation.
 
-**Retrieval Strategy**: Semantic similarity search on goal embeddings with a minimum success score filter (`WHERE success_score >= 0.7`). This ensures the agent learns from successful trajectories and ignores failures. If a new goal is "scrape product prices from competitor site," it will retrieve the trajectory of the last successful web scraping task as a few-shot example.
+The [graph](demo_agents/agents/enterprise_agent.py) performs an initial search and permits additional search or storage through tools. A final response with no initial documents and no successful document-bearing tool artifact is replaced by an abstention. This is a programmatic evidence-presence check, not a citation verifier or a complete grounding guarantee.
 
-**Why success_score filtering matters**: Without it, the agent would retrieve the most similar trajectory regardless of outcome — potentially learning from failures. The score filter creates a "quality gate" that only surfaces proven strategies.
+**Boundary:** the database checks authorization; the model does not grant a role. Policy updates are versioned, but there is no immutable audit ledger, approval workflow, or claim-level citation system. For a learning extension, add source IDs and version-aware citations before expanding into multi-agent routing.
 
-### Compare and Contrast
+## Pattern 4: Adaptive tutor memory
 
-| Approach | Strength | Weakness | When to Use |
-|----------|----------|----------|-------------|
-| **Trajectory recall + real tools (this project)** | Learns from past successes; actually executes tasks via shell/HTTP | Requires manual or programmatic scoring; shell access adds security concerns | Structured tasks with measurable outcomes |
-| **ReAct / Tool-using agents** | Dynamic tool selection; no historical dependency | No learning across episodes; each task starts from scratch | Tasks requiring diverse tool chains |
-| **Fine-tuned agent models** | Compresses experience into model weights; fast inference | Expensive to retrain; catastrophic forgetting | High-volume, repetitive task domains |
-| **Reflexion / self-critique loops** | Self-improving via verbal feedback; no external scoring needed | Can amplify biases; requires strong base model | OpenAI/exploratory domains without clear success metrics |
+**Outcome:** expose stored proficiency, a simple time-decay heuristic, and prerequisite readiness to a tutor.
 
-### Agent Implementation
-
-The LangGraph agent uses a **3-node tool-calling graph**: `recall_past_trajectories` → `agent` → `tools`. The recall node searches for similar successful trajectories, the agent node plans and decides on tools, and the tools node executes. The LLM can:
-
-- Call `search_trajectories` again if more history is needed
-- Call `execute_shell_command` to run data processing scripts
-- Call `fetch_url` to make real HTTP requests (e.g., scraping, API calls)
-- Call `read_file` / `write_file` for data I/O
-- Call `store_trajectory` to record the completed task in memory for future recall
-
-**Tools available**: `search_trajectories`, `store_trajectory`, `execute_shell_command`, `fetch_url`, `read_file`, `write_file`
-
-**What changed from the original**: The agent no longer simulates execution via the LLM. It has real execution tools and writes completed trajectories back to the memory engine, creating a genuine feedback loop.
-
----
-
-## Pattern 3: Enterprise Knowledge Memory
-
-### Use Case
-An internal knowledge base agent serving employees across an organization. Different roles (admin, employee, contractor) must have access to different subsets of documents. The system must enforce access control at the retrieval level — not just hide results in the UI, but never retrieve them in the first place.
-
-### Memory Architecture
-
-**Storage**: The `enterprise_documents` table stores documents with `allowed_role`, `status` (ACTIVE/ARCHIVED), temporal validity (`valid_from`/`valid_until`), full-text search vectors (`tsvector`), and semantic embeddings.
-
-**Retrieval Strategy**: Reciprocal Rank Fusion (RRF) combining:
-- **Vector similarity** via HNSW index (semantic matches)
-- **Full-text search** via GIN index on `tsvector` (keyword matches)
-- **Role-based access** via `WHERE allowed_role = $3`
-- **Temporal validity** via `WHERE (valid_until IS NULL OR valid_until > now())`
-
-RRF sums `1 / (60 + rank)` from independently retrieved vector and lexical candidate lists. Eligibility is checked in both lists. The server authenticates the caller and verifies requested role membership before searching.
-
-**Why RRF over weighted blending?** Weighted blending requires tuning weights per query domain. RRF avoids blending raw scores on incompatible scales; its rank constant, candidate limits, and relevance thresholds still need evaluation across query types — from exact policy lookups ("what's the password rotation policy") to open-ended searches ("what are my remote work options").
-
-### Compare and Contrast
-
-| Approach | Strength | Weakness | When to Use |
-|----------|----------|----------|-------------|
-| **RRF + RBAC (this project)** | Rank fusion with k=60; access enforced at retrieval | Two separate indexes to maintain; FTS quality depends on language config | Regulated industries, multi-tenant SaaS, internal knowledge bases |
-| **Pure vector search** | Simple; good for semantic similarity | Misses exact keyword matches ("NDA" → "Non-Disclosure Agreement") | Q&A over unstructured text |
-| **Pure FTS (Elasticsearch)** | Excellent keyword precision; faceted search | No semantic understanding; misses conceptually similar but lexically different docs | E-commerce search, log search |
-| **Graph RAG (Neo4j + LLM)** | Captures document relationships and citations | Complex infrastructure; slow ingestion | Legal document analysis, research literature |
-
-### Agent Implementation
-
-The LangGraph agent uses a **3-node tool-calling graph**: `search_policy_docs` → `agent` → `tools`. The search node passes the user's role and query to the memory engine, which filters documents server-side. The LLM can use `search_policy_documents` for additional lookups or `store_policy_document` to write back new policies.
-
-**Tools available**: `search_policy_documents`, `store_policy_document`
-
-**What changed from the original**: The agent now supports write-back (storing new policy documents) and multi-turn conversations via the checkpointer.
-
----
-
-## Pattern 4: Adaptive Tutor Memory
-
-### Use Case
-An AI tutor that tracks a learner's proficiency across a skill tree, applies a forgetting curve to model knowledge decay over time, and identifies the most impactful skill gaps to address next.
-
-### Memory Architecture
-
-**Storage**: Two tables form a directed acyclic graph:
-- `tutor_skills`: Nodes in the skill tree with optional `parent_skill_id` for hierarchical relationships (e.g., `calculus` requires `algebra` which requires `math_basics`)
-- `tutor_user_progress`: Per-user proficiency scores (0.0–1.0) with `last_reviewed_at` timestamps
-
-**Retrieval Strategy**: The gap assessment query computes a decayed score using an Ebbinghaus-style exponential forgetting curve with a fixed retention rate:
+`tutor_skills` supports one parent per skill; `tutor_user_progress` stores scores and review times. The [recursive query](memory_engine/routers/tutor.py) walks transitive prerequisites and computes a fixed exponential decay:
 
 ```sql
 COALESCE(proficiency_score, 0.0) *
 POWER(0.95, seconds_since_review / 86400.0) AS decayed_score
 ```
 
-This formula models the exponential decay of memory: a skill mastered at 1.0 drops to 0.95 after one day, 0.90 after two days, and approaches 0.0 over time. Each skill gets one of three statuses: `not_started` (no progress row: never practiced), `gap` (practiced, but the decayed score is below 0.5: learned and then forgotten, or never mastered), or `mastered`. The difference matters pedagogically: a `gap` calls for review, a `not_started` skill calls for first instruction. A recursive CTE walks the skill tree (each skill has at most one parent) to mark a skill `ready` only when every transitive prerequisite is above 0.5.
+A missing progress row is `not_started`; a practiced skill below 0.5 is a `gap`; otherwise it is `mastered`. Readiness requires every transitive prerequisite to meet the threshold. These are application labels derived from the formula, not measured psychological states.
 
-**Why compute decay in SQL?** Moving the decay computation to the database layer means the agent doesn't need to retrieve all user scores and recalculate. The query returns pre-computed decayed scores, and the agent can focus on pedagogical decisions.
+The [graph](demo_agents/agents/tutor_agent.py) runs `assess → agent → tools → agent`, with `get_skill_gaps` and `update_skill_progress`. The prompt asks for demonstrated mastery before recording improvement; no independent assessment engine enforces that request.
 
-### Compare and Contrast
+**Boundary:** fixed 0.95 retention is an educational simplification, not a calibrated learner model or a spaced-repetition scheduler. A meaningful next experiment would use scored exercises, preserve assessment evidence, and compare review scheduling against a baseline on held-out responses.
 
-| Approach | Strength | Weakness | When to Use |
-|----------|----------|----------|-------------|
-| **Ebbinghaus decay in SQL (this project)** | Familiar, mathematically grounded model; efficient server-side computation | Fixed decay constant (0.95) — doesn't adapt to individual learning rates | Structured curricula with clear skill hierarchies |
-| **Spaced Repetition (Anki/SM-2)** | Proven algorithm with per-card intervals; adaptive difficulty | Single-card focus; no hierarchical skill modeling | Flashcard learning, language vocabulary |
-| **Bayesian Knowledge Tracing** | Probabilistic; models guess/slip parameters | Requires labeled problem-response data; complex to tune | Educational assessment platforms |
-| **LLM-only assessment** | Flexible; can evaluate open-ended responses | No persistent model of knowledge state; inconsistent scoring | Qualitative feedback, essay grading |
+## Pattern 5: Multi-agent swarm memory
 
-### Agent Implementation
+**Outcome:** coordinate concurrent workers through transactional claims and expiring leases.
 
-The LangGraph agent uses a **3-node tool-calling graph**: `assess_skill_gaps` → `agent` → `tools`. It queries the memory engine's `/tutor/gaps/{user_id}` endpoint, which returns all skills with their decayed scores. The LLM can use `get_skill_gaps` to refresh the assessment and **`update_skill_progress` to write back updated proficiency** after the learner demonstrates mastery.
+The name “swarm” is historical. The [implementation](demo_agents/agents/swarm_agent.py) is a deterministic supervisor over existing tasks, parallel `Send` workers, and an aggregate node. The supervisor does not ask a model to decompose a goal. In assigned mode it chooses task IDs; in pull mode it only sizes the worker pool and workers race for claims. The CLI demonstrates pull mode.
 
-**Tools available**: `get_skill_gaps`, `update_skill_progress`
-
-**What changed from the original**: The agent now closes the feedback loop — after teaching and assessing, it writes updated proficiency scores back to memory. Multi-turn conversations via the checkpointer enable iterative learning sessions.
-
----
-
-## Pattern 5: Multi-Agent Swarm Memory
-
-### Use Case
-A coordinated team of specialized agents (e.g., sentiment analysis, entity extraction, summarization) working on a shared workflow. Each agent independently claims pending tasks from a shared blackboard, executes its specialty using real tools, and marks tasks complete. No agent should claim a task that another agent already took.
-
-### Memory Architecture
-
-**Storage**: The `swarm_blackboard` table is a distributed task queue. Each row represents a task with `status` (PENDING → IN_PROGRESS → COMPLETED), an optional `assigned_agent`, and a `payload` (JSONB) for task-specific data.
-
-**Coordination Strategy**: PostgreSQL's `FOR UPDATE SKIP LOCKED` clause provides row-locked task claiming with leases:
+The [claim transaction](memory_engine/routers/swarm.py) selects either a pending row or an expired in-progress row:
 
 ```sql
-SELECT task_id, task_name, payload
-FROM swarm_blackboard
-WHERE workflow_id = $1 AND status = 'PENDING'
-ORDER BY created_at ASC
-LIMIT 1
-FOR UPDATE SKIP LOCKED
+SELECT task_id FROM swarm_blackboard
+WHERE ($1::text IS NULL OR workflow_id = $1)
+  AND ($2::uuid IS NULL OR task_id = $2)
+  AND (status = 'PENDING'
+       OR (status = 'IN_PROGRESS' AND lease_until < clock_timestamp()))
+ORDER BY created_at, task_id
+LIMIT 1 FOR UPDATE SKIP LOCKED;
 ```
 
-When multiple agents execute this query simultaneously:
-1. PostgreSQL acquires a row-level lock on the first PENDING row for one agent
-2. Other agents **skip** the locked row and move to the next available one
-3. Each agent updates their claimed row to `IN_PROGRESS` within the same transaction
-4. A random five-minute lease identifies the claimant; completion verifies the lease and state. Expired claims are reclaimable.
+The same transaction sets the claimant, a random lease token, and a five-minute deadline. Completion requires the matching task, claimant, active token, and IN_PROGRESS state. Worker code owns the lease, validates it before each tool call, and overrides model-supplied completion credentials. Claims and tokens do not round-trip through the model.
 
-**Why SKIP LOCKED over a message queue (RabbitMQ/Kafka)?** For agents that already need a database for state persistence, using the same database as a lightweight task queue eliminates an additional infrastructure dependency. This pattern works well for moderate throughput (<1K tasks/second). For high-throughput streaming, a dedicated message broker is preferable.
+Workers use a local tool loop capped at eight model rounds. Graph tasks default to at most five concurrent executions. `Send` schedules branches; the PostgreSQL queue coordinates claims. They solve different problems. This local Compose runner does not demonstrate a fleet of distributed graph workers.
 
-### Swarm vs. Supervisor vs. Hierarchical Multi-Agent
+**Boundary:** row locking prevents conflicting concurrent claims; an expired lease intentionally permits a later claimant. A pre-dispatch lease check cannot prevent an already-running remote action from completing after lease loss. Add destination idempotency, an outbox where appropriate, lease renewal, and failure/retry policy before relying on external effects. See the [PostgreSQL locking documentation](https://www.postgresql.org/docs/16/sql-select.html#SQL-FOR-UPDATE-SHARE); no throughput ceiling is established by this demo.
 
-This is a critical distinction that the current demo label ("Swarm Agent") oversimplifies:
+## Pattern 6: Relational companion memory
 
-| Pattern | Coordination Mechanism | LangGraph Primitive | This Demo |
-|---------|----------------------|-------------------|-----------|
-| **Swarm (this demo)** | Shared blackboard + autonomous pull; a supervisor decomposes work and fans out to parallel specialist workers | `StateGraph` + `Send` API for parallel fan-out; each worker is a tool-calling agent claiming its assigned task | **Hybrid** — LangGraph-level fan-out + database-level SKIP LOCKED claiming |
-| **Supervisor** | Central orchestrator that decomposes work and assigns to specialist sub-agents | `StateGraph` with subgraphs compiled into nodes; supervisor node routes via conditional edges | Partially implemented (single-level supervisor + Send) |
-| **Hierarchical** | Tree of supervisors, each managing a team of specialists with escalation paths | Nested `StateGraph` instances with `Send` API for fan-out to parallel workers | **Not implemented** |
+**Outcome:** retrieve user-scoped assertions and episodes, track updates and temporary context, and support explicit forgetting.
 
-### Compare and Contrast
+The [engine](memory_engine/routers/companion.py) uses graph nodes/edges, episodes/chunks, ephemerals, fact-source associations, and a memory-state record. The latter tracks whether recording is enabled, the deletion generation, and embedding-space identity.
 
-| Approach | Strength | Weakness | When to Use |
-|----------|----------|----------|-------------|
-| **SKIP LOCKED blackboard (this project)** | Co-located with app DB; no external queue; transactional consistency | Not suitable for high throughput (>1K TPS); no message redelivery/replay | Moderate-scale multi-agent workflows with strong consistency needs |
-| **RabbitMQ / Kafka** | Battle-tested; high throughput; persistence and replay | Additional infrastructure; eventual consistency model | High-volume event-driven agent systems |
-| **LangGraph Send API** | Native multi-agent fan-out within the graph framework; no external queue needed | All workers share the same Python process; not horizontally scalable | Single-process agent systems; prototyping |
-| **Celery / Temporal** | Horizontal scaling; retry policies; cron scheduling built in | Heavy infrastructure; complex deployment | Production workflow orchestration |
+| Domain | Records | Interpretation |
+|--------|---------|----------------|
+| Assertions | Graph nodes and versioned edges | Extracted or supplied claims with current/historical state |
+| Episodes | Episode text, chunks, source associations | Retained interaction evidence; subject to deletion |
+| Temporary context | Expiring ephemerals | Omitted from context after expiry; filtering does not physically purge the row |
+| Recording policy | Memory-state row | Disabled after forgetting until explicitly resumed; stale generations cannot write |
 
-### Agent Implementation
+Assertions have `user`, `self`, or `shared` scope. `self` records persona claims from assistant outputs, not real personal experience. `shared` records claims about interactions. Retrieving assistant-generated claims back into context can reinforce mistakes, so persona consistency must be evaluated separately from truth about the user.
 
-The LangGraph agent uses a **supervisor + Send API fan-out** topology:
+The extractor emits a constrained UPPER_SNAKE vocabulary; the engine normalizes stored predicates to lowercase snake_case. Known aliases and normalized entity keys reduce duplicates, but do not provide general entity resolution. Single-valued predicates (`lives_in`, `works_at`, `married_to`, `has_name`, `has_age`, `birthday_on`) close prior active values in the same subject scope. That policy is deliberately narrow: a person can have several homes or jobs, so broader domains need an explicit cardinality/conflict policy.
 
-1. A `supervisor` node reads the shared blackboard and collects every PENDING task
-2. A conditional edge returns one `Send` per task, dispatching parallel worker nodes
-3. Each `worker` claims a task in application code before invoking the model, validates the lease before tool dispatch, executes the task, and completes it using application-held task and lease values. In `assigned` mode the supervisor pins the task ID; in `pull` mode (Demo 5) workers race the claim-next endpoint, so `SKIP LOCKED` arbitrates contention. Lease tokens never round-trip through the LLM.
-4. An `aggregate` node merges worker reports (via a reducer) into a final summary and snapshots the blackboard
+`valence` and `intensity` are bounded extractor annotations, not validated emotion measurements. Negative emotion does not terminate a current fact. Provenance identifies a source episode; it supports inspection, not automatic verification of the source's claim. Observed validity intervals preserve history without arbitrary retrospective bitemporal correction.
 
-The workers run concurrently; safe claiming is still enforced at the database layer via `FOR UPDATE SKIP LOCKED`, so a worker can never claim a task that another worker already took.
+The [graph](demo_agents/agents/companion_agent.py) runs `retrieve → agent ↔ tools → extract`. Retrieval uses the current query and limits; it does not fetch every fact. Tools can search episodes, store facts/episodes/ephemerals, terminate a scoped relationship, or forget memory. The extraction node uses a JSON prompt and parser, then writes episodes and assertions through the engine. Provider-native schema-constrained extraction is a possible improvement, not the current implementation.
 
-**Worker model tools**: `list_workflow_tasks`, `complete_swarm_task`, `execute_shell_command`, `fetch_url`. Claiming is application-owned; `claim_next_task` and `claim_task` remain available as standalone API tools.
+Forgetting is exclusive within a tool batch: sibling writes are cancelled. The engine deletes that user's companion facts, provenance, episodes/chunks, ephemerals, and companion checkpoint threads, disables companion recording, and advances the generation. The custom saver rejects stale-generation checkpoint writes. The public wrapper returns only a deletion acknowledgement after forgetting. Other domains, extension evidence/checkpoints, workspace files, and project/branch hook excerpts are outside this endpoint's deletion scope.
 
-**What changed from the original**: The swarm is no longer a sequence of independent agent invocations. A single supervisor invocation fans out to parallel specialist workers via the LangGraph Send API — combining LangGraph-level multi-agent topology with the DB-level SKIP LOCKED blackboard. Multi-agent concurrency is validated in the test suite (`test_skip_locked_no_deadlock`, `test_eval_swarm_concurrency`).
+**Boundary:** exported traces, backups, external provider retention, and prompt-injection resistance require separate treatment. Character-bounded prompts still contain retrieved text inside system-message content; treating that text as untrusted evidence and testing adversarial instructions is a high-priority follow-up. The implementation does not establish that retrieved instructions cannot redirect the model.
 
----
+## LangGraph integration analysis
 
-## Pattern 6: Relational Companion Memory
+### Choice of agent API
 
-### Use Case
-An AI companion or personal assistant that maintains a rich, evolving model of its user — their relationships, location, hobbies, goals, and emotional state. It must remember facts indefinitely, track temporary moods that expire, and recall past conversations to provide contextually aware responses.
+Use a deterministic function or workflow when the process is known. Use LangChain's `create_agent` when a standard model/tool loop and middleware fit the task. Use custom LangGraph nodes when the application needs explicit retrieval, grounding, extraction, forgetting, or lease boundaries. More agents or deeper graphs are not inherently better.
 
-### Memory Architecture
+The [v1 migration guide](https://docs.langchain.com/oss/python/migrate/langgraph-v1) replaces deprecated `langgraph.prebuilt.create_react_agent` with `langchain.agents.create_agent`. This repository uses neither prebuilt; its custom `StateGraph` approach remains supported. Switching to `create_agent` would be a design change, not a prerequisite for currency.
 
-**Storage**: Five tables implementing three temporal domains:
+| Primitive | Use in this repository | Important limit |
+|-----------|------------------------|-----------------|
+| `MessagesState`, `START`, `END` | Shared message reducer and explicit graph boundaries | State includes prompt-ready strings in several patterns; storing raw records and formatting on demand is a useful future refactor |
+| `Runtime[AgentContext]` | Immutable scope snapshot constructed by `ScopedGraph` | Input scope must already be authenticated/authorized by the application; it is not a credential |
+| `ToolNode` | Scoped dispatch in five agents | Swarm uses its own lease-aware loop; tool errors are explicitly returned as error messages |
+| `Send` and reducers | Parallel worker fan-out and merged reports | Concurrency is not a distributed deployment guarantee |
+| `AsyncPostgresSaver` | Checkpoints for CLI graphs | Native resume is tested; the scoped wrapper only accepts new-turn dictionaries |
+| `durability="sync"` | Default when a saver is present | No exactly-once guarantee for remote effects; no durability setting is applied without a saver |
+| `interrupt()` and `Command(resume=...)` | Authorized extension approval/resume service | Persisted owner/thread mapping supplies authority; a resume value cannot approve an action |
+| Compiled subgraphs, middleware, streaming | Extension choices | Not exposed as application features in this demo |
 
-| Domain | Tables | Persistence | Example |
-|--------|--------|-------------|---------|
-| **Graph (Persistent)** | `companion_graph_nodes`, `companion_graph_edges` | Until terminated or superseded (`valid_until`) | "Alice LIVES_IN Brooklyn" |
-| **Episodic (Persistent)** | `companion_episodes`, `companion_chunks` | Permanent (archival) | "Talked about wanting a 2BR apartment" |
-| **Ephemeral (Transient)** | `companion_ephemerals` | TTL-based expiration | "Feeling excited this week" (expires in 24h) |
+### Context and execution budgets
 
-**Graph Model**: Entities are connected by typed edges with observed validity intervals and recording timestamps. Termination closes a version; reassertion creates a new version. Multiple source episodes remain associated with a fact. This preserves observed history but does not implement arbitrary retrospective bitemporal correction.
+`prompt_messages` selects complete turns within a 32,000-character budget and retains the latest system message. It does not split a tool-call/result pair. An oversized current turn raises an error. `refresh_messages` replaces the prior system message by ID and caps system content at 20,000 characters.
 
-**Three-Subject Model**: Every node and edge carries a `subject` column — `user`, `self`, or `shared`:
+This bounds an individual prompt, not the size of the stored checkpoint history. It is not token counting, summarization, or long-term compaction. Model choice, tool schemas, and provider overhead affect the actual context limit. See [context engineering](https://docs.langchain.com/oss/python/langchain/context-engineering) for the distinction between the model's context and persistent state.
 
-- **`user`** — durable facts the user revealed ("Alice LIVES_IN Brooklyn")
-- **`self`** — the companion's model of **itself**, extracted from its own outputs ("Iris VALUES honesty", "Iris WRITES poetry"). A backstory endpoint (`POST /companion/backstory`) pre-seeds this per user so the companion starts with a persona and grows from conversation.
-- **`shared`** — relationship facts belonging to both ("we SHARE_RITUAL morning coffee", "Vesper TRUSTS Alice"), the memory of the bond growing together.
+The wrapper sets 32 graph supersteps and five concurrent graph tasks by default; callers can override top-level `recursion_limit` and `max_concurrency`. Exhaustion raises `GraphRecursionError`. Model requests use a 60-second HTTP timeout and at most two retries; these are not tool retries or an end-to-end deadline. Message `.text` handles provider content blocks for display and extraction.
 
-Because both sides live in one graph, the retrieve node can **cross-reference** user vs self facts on affinity predicates and surface common ground — *"hey, we both like pizza!"*.
+### Upgrade and verification boundary
 
-**Single-valued facts**: Some predicates hold at most one current object per subject (`lives_in`, `works_at`, `married_to`, `has_name`, `has_age`, `birthday_on`). Storing `user LIVES_IN Manhattan` closes the active `user LIVES_IN Brooklyn` edge (`status='INACTIVE'`, `valid_until=now`) in the same transaction, so conflict resolution does not depend on the LLM remembering to emit a termination, and the old value stays queryable as history. Multi-valued predicates such as `enjoys` accumulate. Supersession is scoped per subject, so the user and the companion can each live somewhere.
+Rebuild the demo image after dependency changes. The saver runs `setup()` to apply upstream checkpoint migrations. Its subclass now implements the companion deletion-generation fence; the legacy `pending_sends` conversion and private loader override are removed. The CLI closes both pools in `finally`; embedding applications should call `await close_checkpointer()` during shutdown.
 
-**Emotional Scoring + Provenance**: Edges carry `valence` (−1.0…+1.0) and `intensity` (0.0…1.0) so the graph remembers the emotional weight of a fact after the turn ends (a pet's death is `HAS_PET Luna` with `valence=-0.9`). Edges also link to their source episode via `source_episode_id`, enabling provenance queries (`/companion/facts/provenance`) that trace any fact back to where it was inferred.
+Use fresh demo thread IDs, which the runner generates automatically. Back up valued data before upgrading. Resuming historical in-flight 0.6 checkpoints, downgrading a migrated database, and full crash recovery across every pattern remain unverified. `make clean` deletes the volume and is not an upgrade step.
 
-**Ephemeral Model**: Short-lived states (moods, current activities, temporary preferences) use a TTL column (`expires_at`). The context retrieval query filters `WHERE expires_at > clock_timestamp()` — expired ephemerals are silently dropped. This avoids polluting the companion's long-term memory with transient states while still providing real-time contextual awareness.
+The fan-out regression interrupts after the supervisor, rebuilds a native graph, reads pending tasks from PostgreSQL, and resumes with `None`. That demonstrates checkpoint serialization/reconstruction in one process. The separate extension service now supplies scope-authorized resume, a persisted thread-to-owner mapping, revision-bound review, and local-file reconciliation. Its regression kills the actual host during review and exits after atomic file replacement before database acknowledgement. The resumed host reconciles the file digest without rewriting it. This additional evidence applies to that local destination; do not expose raw graph resume to untrusted callers.
 
-**This is the most structurally complex memory pattern in the project**, combining three persistence strategies, three memory subjects, emotional metadata, and provenance in a unified retrieval endpoint.
+### Lessons from the final design review
 
-### Compare and Contrast
+The [final review](DESIGN_REVIEW.md) found failures that successful graph execution alone did not expose. Approval requests held database connections while waiting for graph locks, starving nodes that needed the same pool. Separate API and node pools now break that circular wait. A bounded burst regression verifies this behavior; selecting production pool sizes still requires load measurements.
 
-| Approach | Strength | Weakness | When to Use |
-|----------|----------|----------|-------------|
-| **Graph + Episodic + Ephemeral (this project)** | Models all three temporal domains; typed relationships enable reasoning; versioned edges preserve observed history | Complex schema; edge traversal can be expensive at scale | Personal AI companions, NPC dialogue systems, customer 360 views |
-| **MemGPT / Letta** | OS-inspired memory hierarchy (core ↔ archival); automatic memory management | Fixed memory tiers; limited relationship modeling | Chat-oriented agents with long conversation histories |
-| **Neo4j-native graph agents** | Native graph traversal; optimized for deep relationship chains | Separate infrastructure; embedding generation is external | Social network analysis, recommendation engines |
-| **LangChain ConversationBufferMemory** | Dead simple; just stores recent messages | No persistence across restarts; no entity extraction; context window limits | Quick prototypes, single-session bots |
+PostgreSQL cannot transact an ordinary filesystem replacement. Approval therefore commits `applying` intent before the write, holds a destination lock through acknowledgement, and freezes edits/cancellation after intent. A retry acknowledges matching content; conflicting later content preserves the attempt and returns 409. A later policy change cannot invalidate the observation that the file already contains the reviewed content. See the [recovery table](EXTENSIONS.md#recovery-and-limits) before extending this pattern to another destination.
 
-### Agent Implementation
+Evidence completeness is separate from citation validity. The research workflow now checks every expected labelled statement, records coverage, and withholds a one-sided conclusion if extraction omitted evidence. Old reports without that protocol are excluded from trusted recall. Support checks expiry against the current clock after lock waits. These are application invariants; a larger model or another agent would not enforce them.
 
-The LangGraph agent uses a **4-node graph**: `retrieve_companion_context` → `agent` → `tools`, plus a `extract` node. The retrieve node fetches all graph facts (split into user / self / shared), active ephemerals, and computes common ground between the user and the companion's self-model. The LLM can use:
+## Evaluation layers
 
-- `get_companion_context` to refresh the user's memory state
-- `search_episodic_memory` to find semantically similar past conversations
-- `store_companion_episode` to persist a conversation in episodic memory
-- `store_companion_fact` to add new facts to the relationship graph
-- `store_companion_ephemeral` to record temporary mood/context
+Keep these results separate when reporting progress:
 
-**Tools available**: `get_companion_context`, `search_episodic_memory`, `store_companion_episode`, `store_companion_fact`, `store_companion_ephemeral`
+| Layer | Existing evidence/tooling | What to add or measure |
+|-------|--------------------------|------------------------|
+| Storage and API contracts | Disposable integration tests | Invariants, eligibility, provenance, expiry, deletion, migration repeatability |
+| Graph execution | Scripted-model regressions and PostgreSQL resume test | Dispatch scope, loop limits, pending branches, real approval-host death and restart; other crash boundaries remain open |
+| Extraction | `benchmark_extraction.py` with normalized one-to-one matching | Human-reviewed labels; precision/recall by subject, predicate, negation, and temporal update |
+| Retrieval | Fixture ranking checks; labeled probes in `eval_recall.py` | Recall@K, Precision@K, stale/unauthorized retrieval rate on a representative corpus |
+| Answer and task outcome | Live demo exercises the configured provider | Evidence-supported claims, abstention, verified file/API effects, cost and latency |
+| Operations | No published load/service benchmark | p50/p95 latency, queue contention, checkpoint growth, deletion completion, recovery time |
 
-**Dynamic persona from memory**: Instead of a static system prompt, the retrieve node assembles the prompt each turn from the three memory subjects — *"About YOU (your self-model...)", "About your RELATIONSHIP (shared facts...)", "Things you and the user have in common"* — so the companion's personality and behavior are driven by its accumulated self-model state.
+A probe without expected labels is inspection, not a recall score. Labels extracted by another model measure agreement unless independently reviewed. A model-reported success score is a claim, not an objective task grade. Keep a held-out set and record model/provider, prompt version, embedding-space identity, dataset revision, limits, and the tested code revision with results.
 
-**3-scope extraction**: After responding, the `extract` node runs a structured extraction that separates `user_facts`, `self_facts` (what the companion revealed about itself), and `shared_facts` (relationship), each with a canonical predicate (production-aligned UPPER_SNAKE vocabulary), emotional `valence`/`intensity`, and a `source_episode_id`. The episode is created first, so every fact links back to the conversation it was learned from.
+For a retrieval experiment, compare lexical-only, vector-only, and fused results on the **same eligible records**. Include no-answer cases, near-duplicate facts, old/current facts, and queries that would match another user's data. Evaluate the answer separately: improved retrieval does not by itself establish fewer unsupported claims.
 
-**What changed from the original**: The companion is no longer a passive observer nor a one-sided model of the user — it maintains a balanced memory of both itself and the user, records the emotional weight of facts, tracks provenance, and surfaces shared ground as the relationship grows. Multi-turn conversations via the checkpointer preserve dialogue continuity.
+A minimal outcome comparison should hold the model, task set, and tool budget fixed and compare no domain memory with retrieved memory. A subsequent experiment can compare unrestricted writes with verified promotion. This tests whether memory improves the task rather than merely demonstrating that a database can return records.
 
----
+Provider evaluations require explicit credentials and a disposable dataset; the deterministic runner deliberately strips live-model settings. See [verification commands and label semantics](REMEDIATION.md#verification). The October 24 final-review run observed **207 passed and one optional live-model test skipped**, including 33 extension cases and ten final-review regressions beyond the 164-pass modernization baseline. The [implementation evidence](IMPLEMENTATION_PLAN.md#progress-and-evidence) and [review report](DESIGN_REVIEW.md) record commands and boundaries; this is a dated local result, not a rolling claim about the current branch.
 
-## Comparative Analysis
+## Going further: Production considerations
 
-### Memory Retrieval Workloads
+Start from a concrete outcome, failure budget, and access model. An extra reflection loop, hierarchy, or framework feature is not a substitute for those requirements.
 
-No latency benchmark is established by this demo. Measure query plans, filtered recall, and end-to-end latency on representative data.
-
-| Pattern | Query Type | Measured Latency | Scaling Bottleneck |
-|---------|-----------|-----------------|-------------------|
-| Developer | HNSW ANN + trgm filter | Not measured | Index build time on symbol insert |
-| Task | HNSW ANN + range filter | Not measured | HNSW graph size at >1M trajectories |
-| Enterprise | RRF (vector + FTS) + joins | Not measured | tsvector GIN index size |
-| Tutor | Aggregation query (CTE) | Not measured | Unlikely (small cardinality) |
-| Swarm | SKIP LOCKED SELECT + UPDATE | Not measured | Contention at >100 concurrent agents |
-| Companion | Multiple independent queries | Not measured | Graph edge traversal at >10K nodes |
-
-### Agent Complexity Comparison
-
-| Dimension | Developer | Task | Enterprise | Tutor | Swarm | Companion |
-|-----------|-----------|------|------------|-------|-------|-----------|
-| Storage tables | 1 | 1 | 1 | 2 | 1 | 7 |
-| Indexes | 3 (HNSW + GIN + B-tree) | 1 (HNSW) | 3 (HNSW + GIN + unique) | 0 | 1 (B-tree) | 7 (3 HNSW + 4 B-tree) |
-| Query complexity | Medium | Simple | High | Medium | Medium | High |
-| Agent graph nodes | 3 | 3 | 3 | 3 | 3 | 4 |
-| Tools available | 5 | 6 | 2 | 2 | 6 | 7 |
-| State transitions | Read + Write | Read + Write | Read + Write | Read + Write | Read + Write | Read + Write |
-| Multi-agent capable | — | — | — | — | Yes (Send + DB level) | — |
-| Real execution | Shell, file | Shell, HTTP, file | — | — | Shell, HTTP | — |
-
-### When to Use Which Pattern
-
-| If your agent needs… | Use this pattern | Because… |
-|----------------------|-----------------|----------|
-| To search and understand code across projects | Developer Workspace | Branched symbol storage with hybrid semantic+symbolic search + file/shell tools |
-| To learn from past successes and actually execute tasks | Autonomous Task | Trajectory recall with success score quality gate + real HTTP/shell execution |
-| To serve different internal audiences with access-controlled knowledge | Enterprise Knowledge | RRF ranking with server-side RBAC enforcement |
-| To personalize education with adaptive skill tracking | Adaptive Tutor | Skill tree with Ebbinghaus forgetting curve in SQL + write-back feedback loop |
-| To coordinate multiple specialist agents on shared workflows | Multi-Agent Swarm | Supervisor + Send API fan-out with SKIP LOCKED blackboard claiming + execution tools |
-| To build a relationship with a user over time with persistent memory | AI Companion | Three-domain memory (graph + episodic + TTL ephemeral) + bidirectional write-back |
-
----
-
-## LangGraph Integration Analysis
-
-### Current State
-
-Every LangGraph agent in this project is a **3-node tool-calling pipeline** with conditional routing (the Companion adds a fourth extraction node):
-
-```
-entry node → agent (LLM + tools) → [conditional: tool_calls?] → tools → agent → END
-```
-
-The entry node retrieves memory context from the API, the agent node invokes the LLM with bound tools, and the tools node (`ToolNode`) executes tool calls. A conditional edge checks for `tool_calls` on the last message — if tools were called, the graph loops back to the agent for follow-up; otherwise it ends. The Companion graph branches to a final `extract` node that runs structured 3-scope extraction (user/self/shared) with emotional valence and provenance before ending.
-
-**This project uses**:
-- **ToolNode** — tool calling and function execution via `langgraph.prebuilt`
-- **Conditional edges** — branching based on whether the LLM requested tools
-- **Loops/cycles** — agent → tools → agent iteration for multi-step tool sequences
-- **Checkpointer** — Postgres-backed state persistence via `langgraph.checkpoint.postgres.aio.AsyncPostgresSaver`
-- **Bidirectional memory** — all agents can both read from and write to the memory engine
-- **Send API** — the Swarm pattern fans out from a supervisor to parallel worker nodes
-- **Post-response extraction** — the Companion writes back structured, typed memory (including self-model facts) after each turn
-
-**This project does not yet use**:
-- **Subgraphs** — no composed agent hierarchies (the Swarm supervisor uses nodes, not compiled subgraphs)
-- **Interrupt/Command** — no human-in-the-loop or dynamic routing
-
-### What a Production-Grade Implementation Would Add
-
-For each agent to become production-ready using LangGraph's full capabilities:
-
-**Developer Agent**: Add AST-based symbol auto-discovery (tool that parses Python/JS files), incremental index updates, and a conditional edge that checks "did we find relevant symbols?" before routing.
-
-**Task Agent**: Already has real execution tools. Add a reflexion loop (`planning` → `execution` → `evaluation` → `replan` via conditional edges) and automatic success scoring of executed tasks.
-
-**Enterprise Agent**: Add a conditional guardrail node (`search` → `has_results?` → `generate` or `deny`), implement citation chaining via tool calls, and add an audit logging node that records every retrieval.
-
-**Tutor Agent**: Implement prerequisite-aware routing via conditional edges (if `algebra` is a gap, route to `algebra_lesson` before `calculus_lesson`), and adaptive decay rates per learner.
-
-**Swarm Agent**: Already has a supervisor + Send API fan-out. A further production upgrade would compile each worker as a subgraph, add a merge/rollback policy for failed workers, and support nested hierarchies (supervisors of supervisors) with escalation paths.
-
-**Companion Agent**: Extraction, persisted assertion ranking, bounded prompts, and deletion-aware checkpoints are implemented. Production work still needs labeled retrieval and answer-quality evaluation, explicit conflict policies, and operational auditing.
-
-### Why the Focus on Infrastructure First
-
-Building the memory engine first — before adding complex agent graph logic — follows the principle of separating **storage** from **computation**. The PostgreSQL schemas, indexes, and retrieval queries in this project are reusable regardless of the agent framework on top. You could replace LangGraph with a different orchestration layer (CrewAI, AutoGen, raw async Python) and the memory engine would still serve all six patterns.
-
----
-
-## Going Further: Production Considerations
-
-### Observability
-Add LangSmith/LangFuse callbacks to trace retrieval-to-generation pipelines. Log every memory engine query with timing, result count, and error codes.
-
-### Testing and Evaluation
-The deterministic suite in `tests/` validates functional correctness. For production, add:
-- **Retrieval quality evals**: Precision@K and NDCG for each pattern using labeled query→document pairs
-- **Concurrency stress tests**: 100+ parallel swarm agents claiming tasks under load
-- **Decay accuracy tests**: Pre-compute expected decayed scores and assert within tolerance
-- **Role isolation penetration tests**: Verify that no combination of queries leaks cross-role documents
-
-### Scaling
-- For >1M vectors in the developer/task patterns, consider IVF instead of HNSW for faster index builds
-- For the companion graph, consider adding recursive CTEs for deeper relationship traversal (friend-of-friend queries)
-- For the swarm blackboard, add lease renewal for work longer than the current five-minute lease and idempotent external side effects.
+| Concern | Practical next step | Evidence required |
+|---------|---------------------|-------------------|
+| Memory integrity | Keep source IDs, proposed/accepted state, correction and promotion policy | Adversarial and contradictory records cannot silently become trusted instructions |
+| Retrieval and context | Retain raw records, format evidence on demand, measure token budgets and quality | Representative recall/abstention and answer-grounding comparison |
+| Recovery and effects | Separate review, commit, and external-action boundaries; introduce destination idempotency | Failure injection before/after effects does not duplicate the action |
+| Observability | Correlate run/thread, tool call, source IDs, scope decisions, and outcomes; redact content deliberately | A failure can be reconstructed without logging credentials or unnecessary personal data |
+| Retention | Define checkpoint, domain, trace/export, and backup lifetimes | Deletion and expiry assertions hold for every system in the declared boundary |
+| Concurrency | Test contention, lease expiry/renewal, and slow workers under a fixed workload | Measured correctness and latency under the expected load |
+| Deployment | Separate privileges, migrations, and provider compatibility checks | Verified startup/upgrade/recovery on the intended environment |
+
+Do not pick a vector store or index by a universal row-count threshold. Measure filtered recall, write rate, memory, index build cost, and query plans. [pgvector](https://github.com/pgvector/pgvector) documents HNSW/IVFFlat tradeoffs and filtering behavior; choosing an index is workload-dependent. No latency, throughput, or production scale is established here.
+
+The additional teaching modules begin with [approval and resume](USE_CASES.md#1-approval-and-resume), [evidence-backed support](USE_CASES.md#2-evidence-backed-support), and [verified procedural memory](USE_CASES.md#3-verified-procedural-memory). Continue with incidents, research and analytics. [Extension operations](EXTENSIONS.md) includes the offline command, API shapes, permission split, and explicit provider comparison.
+
+## Primary references
+
+- [LangGraph workflows and agents](https://docs.langchain.com/oss/python/langgraph/workflows-agents): choosing deterministic and model-directed control flow.
+- [Thinking in LangGraph](https://docs.langchain.com/oss/python/langgraph/thinking-in-langgraph): node boundaries, raw state, and error handling.
+- [Persistence](https://docs.langchain.com/oss/python/langgraph/persistence): checkpoints versus long-term stores.
+- [Interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts): approval/resume and replay behavior.
+- [Context engineering](https://docs.langchain.com/oss/python/langchain/context-engineering): selecting model, tool, and lifecycle context.
+- [V1 migration](https://docs.langchain.com/oss/python/migrate/langgraph-v1): current agent API and supported graph primitives.
+- [pgvector](https://github.com/pgvector/pgvector): vector types, indexing, filtered ANN, and recall measurement.
+- [PostgreSQL 16 SELECT locking clauses](https://www.postgresql.org/docs/16/sql-select.html#SQL-FOR-UPDATE-SHARE): queue-style row selection with `SKIP LOCKED`.

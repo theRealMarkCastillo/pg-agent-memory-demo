@@ -4,7 +4,7 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 
 
-async def get_db_pool():
+async def get_db_pool(*, min_size=10, max_size=10):
     async def init(conn):
         await register_vector(conn)
 
@@ -20,6 +20,8 @@ async def get_db_pool():
         port=int(os.getenv("POSTGRES_PORT", "5432")),
         init=init,
         setup=setup,
+        min_size=min_size,
+        max_size=max_size,
     )
     try:
         async with pool.acquire() as conn:

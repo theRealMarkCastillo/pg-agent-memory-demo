@@ -4,7 +4,7 @@ from db import get_db_pool
 from auth import authorize, credentials
 from fastapi.responses import JSONResponse
 from openai import OpenAIError
-from routers import developer, task_agent, enterprise, tutor, swarm, companion
+from routers import developer, task_agent, enterprise, tutor, swarm, companion, hooks
 
 
 @asynccontextmanager
@@ -16,6 +16,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Unified Agent Memory Engine", lifespan=lifespan)
+app.include_router(hooks.router, dependencies=[Depends(authorize)], prefix="/hooks")
 
 
 @app.exception_handler(OpenAIError)

@@ -1,44 +1,33 @@
 # pg-agent-memory-demo: A Reference Implementation of Agent Memory Patterns
 
-A Docker Compose stack demonstrating six canonical agent memory patterns using **PostgreSQL** (pgvector + pg_trgm), **LangGraph**, and any **OpenAI-compatible API** (OpenAI, Ollama, vLLM, OpenRouter, Gemini).
+A Docker Compose stack demonstrating six agent memory and coordination patterns using **PostgreSQL** (pgvector + pg_trgm), **LangGraph**, and a configured **OpenAI-compatible chat and embedding endpoint**.
 
 ---
 
-## Academic Context
+## What you will learn
 
-Modern LLM-based agents face a fundamental challenge: **LLMs are stateless**. Every inference call is independent, bounded by a context window, and loses all information from prior interactions. This creates three problems:
+Model requests only use the context supplied to them; an application must decide what to retain, retrieve, update, and delete between requests. A larger context window does not remove those decisions. Retrieving previous experience changes the input to a model; it does not train its weights or prove that a stored claim is true.
 
-1. **Continuity Gap** — Agents cannot persist context, preferences, or history across sessions.
-2. **Knowledge Decay** — Agents cannot learn from prior successes or failures.
-3. **Scalability Wall** — Embedding all relevant history in every prompt saturates context windows.
+This repository teaches six concrete storage and coordination patterns in PostgreSQL. LangGraph provides the control flow and thread checkpoints; the memory engine provides domain records across threads. The examples are inspectable teaching implementations, with deterministic regression checks and separate live-provider evaluation.
 
-While vector databases (Pinecone, Weaviate, Qdrant) and agent frameworks (LangGraph, CrewAI, AutoGen) have made embedding-based retrieval accessible, **the database is the memory** — and the choice of storage primitives, indexing strategies, and retrieval algorithms fundamentally shapes what an agent can remember and how it can reason.
+Start with the [guide and workshop path](GUIDE.md#workshop-path), use the [runbook](RUNBOOK.md) to operate the stack, and see [additional use cases](USE_CASES.md) for six implemented extension workflows with acceptance evidence. The checked agent baseline is LangGraph 1.2.17 with LangChain Core 1.7.0 and OpenAI integration 1.7.2; exact dependencies live in [demo requirements](demo_agents/requirements.txt).
 
-This project demonstrates that a single PostgreSQL instance, enhanced with pgvector and pg_trgm, can serve as the memory substrate for six fundamentally different agent memory architectures — each with distinct storage schemas, retrieval strategies, and coordination mechanisms.
-
-For an in-depth analysis, see **[GUIDE.md](GUIDE.md)** — a comprehensive taxonomy covering memory architecture, compare/contrast analysis, LangGraph integration, and production considerations.
+The [final code and design review](DESIGN_REVIEW.md) records the corrected concurrency, crash-recovery, evidence-completeness, expiry, and artifact-validation defects, with the commands and limits of the local verification.
 
 ---
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    A[Demo agents: LangGraph] -->|Scoped HTTP: memory reads and writes| M[Memory engine: FastAPI]
+    M -->|Domain queries and transactions| P[(PostgreSQL: domain tables)]
+    A -->|Direct psycopg connection| C[(PostgreSQL: checkpoint tables)]
+    A -->|Chat and extraction requests| L[Configured chat provider]
+    M -->|Embedding requests| E[Configured embedding provider]
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                           DOCKER COMPOSE NETWORK                              │
-│                                                                              │
-│  ┌───────────────────┐      ┌──────────────────┐      ┌──────────────────┐  │
-│  │   demo-agents     │◄────►│  memory-engine   │◄────►│    postgres      │  │
-│  │   (LangGraph)     │      │    (FastAPI)     │      │  (pgvector +     │  │
-│  │  tool calling +   │      │                  │      │   pg_trgm +      │  │
-│  │  checkpointer     │      │                  │      │  checkpointer)   │  │
-│  └────────┬──────────┘      └──────────────────┘      └──────────────────┘  │
-└───────────┼──────────────────────────────────────────────────────────────────┘
-            │
-            ▼ (External HTTP)
-  ┌──────────────────────────────────────────┐
-  │  OpenAI-Compatible LLM & Embedding API   │
-  └──────────────────────────────────────────┘
-```
+
+Domain and checkpoint tables share the PostgreSQL service. Checkpoints preserve a thread's execution state; they do not replace domain schemas or their authorization rules. Direct database access by the demo runner is trusted application access, not a model tool.
 
 | Service | Role | Host Port |
 |---------|------|-----------|
@@ -50,16 +39,16 @@ For an in-depth analysis, see **[GUIDE.md](GUIDE.md)** — a comprehensive taxon
 
 ## Six Memory Patterns
 
-Each pattern addresses a distinct agent archetype with different memory requirements. The following table maps each pattern to its storage primitives, retrieval algorithm, and the cognitive function it analogizes:
+Each pattern addresses a distinct agent archetype with different memory requirements. The following table maps each pattern to its storage primitives, retrieval algorithm, and the application behavior it illustrates:
 
-| # | Archetype | Memory Type | PostgreSQL Primitive | Retrieval Algorithm | Cognitive Function |
+| # | Archetype | Memory Type | PostgreSQL Primitive | Retrieval Algorithm | Application Behavior |
 |---|-----------|------------|---------------------|-------------------|-------------------|
 | 1 | **Developer Assistant** | Symbolic Code Memory | halfvec HNSW + pg_trgm GIN | RRF (Cosine ANN + trigram) | Semantic recall + pattern matching |
-| 2 | **Autonomous Task Agent** | Episodic Trajectory Memory | halfvec HNSW + REAL filter | Similarity search with success gate | Experience-based planning |
-| 3 | **Enterprise Knowledge Agent** | Policy & Audit Memory | halfvec HNSW + tsvector GIN | Reciprocal Rank Fusion (RRF) | Role-gated knowledge retrieval |
-| 4 | **Adaptive Tutor** | Skill Tree Memory | CTE + decay function | Forgetting-curve gap analysis | Spaced repetition modeling |
-| 5 | **Multi-Agent Swarm** | Blackboard Memory | FOR UPDATE SKIP LOCKED | Row-locked task claiming with leases | Distributed coordination |
-| 6 | **AI Companion** | Relational Identity Memory | Graph + TTL + chunk HNSW | Multi-domain context merge | Autobiographical memory (user + self + shared) |
+| 2 | **Autonomous Task Agent** | Episodic Trajectory Memory | halfvec HNSW + REAL filter | Similarity search with success gate | Reuse of recorded task examples |
+| 3 | **Enterprise Knowledge Agent** | Versioned Policy Memory | halfvec HNSW + tsvector GIN | Reciprocal Rank Fusion (RRF) | Role-gated knowledge retrieval |
+| 4 | **Adaptive Tutor** | Skill Tree Memory | CTE + decay function | Forgetting-curve gap analysis | Heuristic decay and prerequisite readiness |
+| 5 | **Multi-Agent Swarm** | Blackboard Memory | FOR UPDATE SKIP LOCKED | Row-locked task claiming with leases | Concurrent task coordination |
+| 6 | **AI Companion** | Relational Identity Memory | Graph + TTL + chunk HNSW | Multi-domain context merge | User, persona, and shared assertions |
 
 For detailed analysis including compare/contrast with alternative approaches, production considerations, and LangGraph integration patterns, see **[GUIDE.md](GUIDE.md)**.
 
@@ -72,19 +61,32 @@ cp .env.example .env
 # Edit .env with your API credentials
 python tools/configure_auth.py
 make build up
-make demo   # seeds first; seeding is idempotent and resets the demo companion user
+make demo   # seeds first and resets the demo companion user
 ```
 
 Once running:
+
 - **API docs:** http://localhost:8001/docs
 - **Health check:** `curl http://localhost:8001/health`
-- **Demo output:** `docker logs -f demo-agent-runner`
+- **Demo output:** streamed by `make demo` from its temporary one-off container
 
 Seeding uses a separate admin credential. The agent runner receives a scoped token. Shell execution is disabled in the Compose runner; local operators can enable the disposable Docker sandbox. See [operating contracts and migration notes](REMEDIATION.md).
 
 ---
 
 ## Configuration
+
+### External agent hooks
+
+Claude Code, Codex CLI, and Hermes can recall project/branch session context and
+save completed turns through the shared memory engine. The adapters use native
+command hooks, scoped credentials, and PostgreSQL text search; they require no
+extra model calls. See [agent hook setup and limitations](AGENT_HOOKS.md) for
+configuration snippets, generic adapter support, and verification steps.
+
+### Model configuration
+
+The chat model must support tool calling; the embedding endpoint must produce vectors with the configured schema dimension. OpenAI-compatible endpoints differ in supported parameters and content formats, so test the chosen model/provider pair. Model names below are configuration examples, not a recommendation of the newest model.
 
 Model settings are in `.env`; `tools/configure_auth.py` creates private API credentials in `.env.auth`:
 
@@ -98,14 +100,17 @@ EMBEDDING_MODEL_NAME=text-embedding-3-small  # Must match halfvec dim in init.sq
 EMBEDDING_DIM=1536                           # Documentation only — hardcoded in SQL
 ```
 
-For local models via Ollama:
+For a chat model served locally, override the chat settings, for example:
+
 ```ini
 LLM_BASE_URL=http://host.docker.internal:11434/v1
-EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
 LLM_MODEL_NAME=llama3.1
 ```
 
+Keep the separately configured embedding endpoint unless a matching embedding model is served locally. Changing `EMBEDDING_DIM` alone does not migrate the schema or make an incompatible model work.
+
 Optional — LangSmith access for the trace tooling (`tools/`):
+
 ```ini
 LANGSMITH_API_KEY=ls-...       # smith.langchain.com API key
 LANGSMITH_PROJECT=eidolon-prod # Project/session to pull traces from
@@ -115,7 +120,7 @@ LANGSMITH_PROJECT=eidolon-prod # Project/session to pull traces from
 
 ## Testing and Evaluation
 
-The integration and regression tests validate functional correctness, retrieval quality, concurrency safety, and the companion memory pipeline:
+The integration and regression tests validate database behavior, scope isolation, graph control flow, concurrency, and the companion memory pipeline. Deterministic retrieval checks validate fixture behavior; they do not establish real-model retrieval or answer quality:
 
 Install the separate engine and test environments described in [REMEDIATION.md](REMEDIATION.md), then run:
 
@@ -125,18 +130,16 @@ make test PYTHON=.venv-tests/bin/python ENGINE_PYTHON=.venv-engine/bin/python
 
 The runner creates and removes disposable services. Deterministic embeddings test application logic; real model quality is evaluated separately with explicit provider credentials.
 
-| Module | Tests | Validates |
-|--------|-------|-----------|
-| `test_schema` | 7 | API health, all router endpoints exist |
-| `test_developer` | 5 | Semantic search ranking, branch isolation, type filter |
-| `test_task` | 5 | Trajectory recall ranking, success_score filter |
-| `test_enterprise` | 6 | RBAC enforcement, RRF scoring, FTS matching |
-| `test_tutor` | 7 | Skill completeness, decay monotonicity, gap vs. not-started classification |
-| `test_swarm` | 7 | SKIP LOCKED concurrency, task lifecycle, no-double-claim |
-| `test_companion` | 20 | Graph facts, self-model, shared facts, backstory, TTL, provenance, valence, user isolation |
-| `test_synthetic` | 10 | Synthetic corpus generation, ground-truth matching, LLM extraction (LLM-gated), common-ground detection |
-| `test_agent_evals` | 8 | Cross-pattern isolation, 20-agent parallel swarm, temporal correctness |
-| `test_main_sync_regressions` | 9 | Scoped fact termination, single-valued fact supersession, repeatable seeding, swarm pull mode with code-held leases, identifier recall from natural-language queries |
+| Coverage | Where to look | What it establishes |
+|----------|---------------|---------------------|
+| Pattern storage and retrieval | `tests/test_developer.py` through `tests/test_companion.py` | Expected API results, filtering, ranking on fixtures, and lifecycle transitions |
+| Runtime and agent behavior | `tests/test_agent_regressions.py`, `tests/test_langgraph_v1.py` | Actual graph/tool loops, scoped dispatch, message blocks, limits, forgetting, and PostgreSQL fan-out resume |
+| Review and pipeline regressions | `tests/test_review_regressions.py`, `tests/test_pipeline_regressions.py`, `tests/test_followup_regressions.py`, `tests/test_main_sync_regressions.py` | Previously fixed failures in migrations, provenance, replay, repeatability, and authorization |
+| Six extensions and final review | `tests/test_extension_*.py`, `tests/test_final_review_regressions.py` | Actual approval restart/reconciliation, bounded contention, evidence freshness/completeness, checked promotion, incident history, and tenant database isolation |
+| External agent hooks | `tests/test_hooks.py` | Adapter protocol fixtures and scoped PostgreSQL recall/capture; installed host compatibility requires a separate smoke test |
+| Synthetic and concurrency scenarios | `tests/test_synthetic.py`, `tests/test_agent_evals.py` | Controlled labels, cross-pattern isolation, and bounded concurrent claims |
+
+See the [evaluation layers](GUIDE.md#evaluation-layers) for the evidence still needed beyond deterministic checks. Test counts are intentionally omitted here so this table remains useful as the suite grows.
 
 For testing the companion memory with real or synthetic data, see the **`tools/` pipeline** below.
 
@@ -145,17 +148,20 @@ For testing the companion memory with real or synthetic data, see the **`tools/`
 ## Project Structure
 
 ```
-├── docker-compose.yml          # 3-service stack
+├── docker-compose.yml          # 3 main services + one-off seed profile
 ├── .env.example                # Configuration template
 ├── Makefile                    # up, down, test, test-eval, ci, clean
 ├── GUIDE.md                    # Educational deep-dive & taxonomy
 ├── RUNBOOK.md                  # Operations & troubleshooting
+├── EXTENSIONS.md               # Six workflows, permissions, recovery, and evaluation
+├── DESIGN_REVIEW.md            # Final findings, design decisions, verification boundary
 ├── postgres/
-│   └── init.sql                # 16 tables (13 pattern + 3 checkpointer), HNSW + GIN indexes
+│   └── init.sql                # Domain tables and indexes; saver creates checkpoint tables
 ├── memory_engine/
 │   ├── Dockerfile
 │   ├── main.py                 # FastAPI application
 │   ├── db.py                   # asyncpg connection pool
+│   ├── migrations/             # Versioned domain, hook, and extension upgrades
 │   ├── embedding.py            # Shared OpenAI embedding client
 │   └── routers/
 │       ├── developer.py        # Symbol CRUD + hybrid search
@@ -167,10 +173,12 @@ For testing the companion memory with real or synthetic data, see the **`tools/`
 ├── demo_agents/
 │   ├── Dockerfile
 │   ├── main.py                 # Seeds data, runs 12 demos (6 patterns + multi-turn + supervisor fan-out + companion lifecycle)
+│   ├── extensions/             # Separate API host, bounded graphs, fixtures, and evaluation
 │   └── agents/
 │       ├── __init__.py
-│       ├── checkpointer.py     # Singleton AsyncPostgresSaver (Send-safe subclass)
-│       ├── tools.py            # 19 memory tools + 4 real execution tools
+│       ├── checkpointer.py     # Deletion-aware AsyncPostgresSaver + pool lifecycle
+│       ├── runtime.py          # Immutable run scope, prompt budget, scoped dispatch
+│       ├── tools.py            # Domain tools + sandboxed execution tools
 │       ├── developer_agent.py  # 3-node graph: search → agent → tools
 │       ├── task_agent.py       # 3-node graph: recall → agent → tools
 │       ├── enterprise_agent.py # 3-node graph: search → agent → tools
@@ -183,8 +191,8 @@ For testing the companion memory with real or synthetic data, see the **`tools/`
 │   ├── parse_traces.py           # Parse LangGraph / RunnableSequence / MasterGraph traces into turns
 │   ├── replay_traces.py          # Replay parsed conversations through companion extraction → engine
 │   ├── eval_recall.py            # Query /companion/context + probe queries for recall
-│   ├── benchmark_extraction.py   # Score our extractor vs production ground-truth facts
-│   ├── generate_synthetic.py     # Generate synthetic conversations + known ground truth
+│   ├── benchmark_extraction.py   # Compare extractor output against supplied labels
+│   ├── generate_synthetic.py     # Generate synthetic conversations + controlled labels
 │   └── cleanup_replay.py         # Forget replay/test users from the memory engine
 └── tests/
     ├── conftest.py             # Shared fixtures + HTTP helpers
@@ -196,7 +204,7 @@ For testing the companion memory with real or synthetic data, see the **`tools/`
 
 ## Companion Memory Design
 
-The Companion pattern (Pattern 6) is the most feature-rich: it models **three subjects** in one graph — the user, the AI companion itself, and their shared relationship — so the memory is balanced and grows together.
+The Companion pattern (Pattern 6) is the most feature-rich: it models **three subjects** in one graph — the user, the AI companion itself, and their shared relationship — so the application can distinguish user assertions, persona assertions, and shared interaction records. These are stored claims, not evidence that the model has personal experiences.
 
 ### Three-Subject Memory (`subject` column)
 
@@ -205,8 +213,8 @@ Every graph node and edge carries a `subject`: `user`, `self`, or `shared`.
 | Subject | What it stores | Example |
 |---------|---------------|---------|
 | `user` | Durable facts the user revealed | `user LIVES_IN Seattle` |
-| `self` | The companion's model of **itself** — extracted from its own outputs | `Vesper VALUES honesty` |
-| `shared` | Relationship facts binding both — "growing together" | `Vesper TRUSTS user`, `we SHARE_RITUAL morning coffee` |
+| `self` | Persona assertions extracted from assistant outputs | `Vesper VALUES honesty` |
+| `shared` | Assertions about shared interactions | `Vesper TRUSTS user`, `we SHARE_RITUAL morning coffee` |
 
 `/companion/context` returns all three groups (`graph_facts`, `self_facts`, `shared_facts`), each relevance-ranked. The agent's system prompt is built **dynamically** from the self-model + shared + user facts each turn, so responses depend on memory state rather than a static personality script:
 
@@ -226,21 +234,21 @@ The retrieve node cross-references `user_facts` against `self_facts` on affinity
 
 ### Emotional Scoring (valence + intensity)
 
-Edges carry `valence` (−1.0 sad/loss … +1.0 joyful) and `intensity` (0.0…1.0), emitted by the extractor and stored. The graph *remembers* emotional weight after the turn ends — e.g. a pet's death is stored as `HAS_PET Luna` with `valence=-0.9`, so future retrievals know to be gentle. Values are clamped server-side.
+Edges carry extractor-supplied `valence` (−1.0…+1.0) and `intensity` (0.0…1.0), clamped server-side. These annotations can inform response tone, but they are not calibrated emotion measurements. A pet's death requires ending a current ownership assertion or recording an appropriate historical event; negative valence alone does not change whether a relationship is current.
 
 ### Fact Provenance
 
-Edges link to the episode they were inferred from via `source_episode_id`. `GET /companion/facts/provenance?name=...` traces any fact back to its exact source conversation, answering *"where did we learn that?"*. Full-text/semantic search finds *conversations*; provenance finds *which fact came from which message*.
+Edges link to the episode they were inferred from via `source_episode_id`. `GET /companion/facts/provenance?user_id=...&name=...` traces any fact back to its exact source conversation, answering *"where did we learn that?"*. Full-text/semantic search finds *conversations*; provenance finds *which fact came from which message*.
 
 ### Entity & Relation Normalization
 
-The engine canonicalizes entities (accent/case/punctuation-insensitive keys + alias map: `me`/`I` → `user`) and relation predicates (UPPER_SNAKE vocabulary aligned with production). Facts fold into existing nodes/edges instead of fragmenting — the same entity under different spellings or the same relation under different phrasings becomes a single canonical row.
+The engine canonicalizes entities (accent/case/punctuation-insensitive keys + alias map: `me`/`I` → `user`) and relation predicates (the extractor emits UPPER_SNAKE; the engine stores normalized lowercase snake_case). Normalized identities allow matching records to reuse existing nodes and active edges. Known aliases and predicate synonyms are handled; arbitrary paraphrases, identity ambiguity, and duplicate extraction still require evaluation.
 
 ---
 
 ## Memory Testing Pipeline (`tools/`)
 
-The `tools/` directory provides a full pipeline for testing the companion memory against **real LangSmith traces** or **synthetic data with known ground truth**:
+The `tools/` directory provides a full pipeline for testing the companion memory using **exported LangSmith traces** or **synthetic data with controlled labels**:
 
 | Tool | Purpose |
 |------|---------|
@@ -249,24 +257,27 @@ The `tools/` directory provides a full pipeline for testing the companion memory
 | `parse_traces.py` | Parse LangGraph / RunnableSequence / MasterGraph traces into `(user, assistant)` turns |
 | `replay_traces.py` | Replay parsed conversations through the companion extraction → memory engine |
 | `eval_recall.py` | Query `/companion/context` + probe queries to measure recall |
-| `benchmark_extraction.py` | Score our extractor against production ground-truth facts (precision/recall/F1) |
-| `generate_synthetic.py` | Generate synthetic conversations with **known** ground-truth facts (user/self/shared) |
+| `benchmark_extraction.py` | Score extracted facts against supplied labels (precision/recall/F1) |
+| `generate_synthetic.py` | Generate synthetic conversations with controlled labels (user/self/shared) |
 | `cleanup_replay.py` | Forget replay/test users from the engine |
 
+Configure `.env` with the permitted trace project and provider settings. These commands export and benchmark; they do not replay records into the engine. For replay and user-scoped cleanup, see the [runbook](RUNBOOK.md#companion-memory-tooling-tools).
+
 **Real-trace workflow:**
+
 ```bash
-python tools/pull_conversations.py --project eidolon-prod --out /tmp/conv
-python tools/benchmark_extraction.py --traces-dir /tmp/conv --sample 30
-python tools/cleanup_replay.py --all-replay
+.venv-tests/bin/python tools/pull_conversations.py --out /tmp/pg-memory-traces
+.venv-tests/bin/python tools/benchmark_extraction.py --traces-dir /tmp/pg-memory-traces --sample 30
 ```
 
 **Synthetic generation is offline; extraction benchmarking below calls the configured model:**
+
 ```bash
-python tools/generate_synthetic.py --count 50 --out traces_synthetic
-python tools/benchmark_extraction.py --traces-dir traces_synthetic --all
+.venv-tests/bin/python tools/generate_synthetic.py --count 50 --out /tmp/pg-memory-synthetic
+.venv-tests/bin/python tools/benchmark_extraction.py --traces-dir /tmp/pg-memory-synthetic --all
 ```
 
-Synthetic data is the primary regression corpus (controlled ground truth, CI-safe); real traces are a periodic reality-check for extractor drift.
+Synthetic generation is offline. The extraction benchmark calls the configured model; synthetic generation does not make that step offline. Trace-derived labels may be another model's outputs, so agreement with them is not independently verified truth. Review representative labels and keep evaluation cases separate from prompt tuning.
 
 ---
 
@@ -275,60 +286,65 @@ Synthetic data is the primary regression corpus (controlled ground truth, CI-saf
 This project implements three key agent capabilities on top of the memory engine:
 
 ### Tool Calling + Write-Back
-All six agents use LangGraph's `ToolNode` with bound `ChatOpenAI` models. Each agent has 2–6 tools including:
-- **Memory tools**: search and write-back to the memory engine (e.g., `search_code_symbols` + `store_code_symbol`)
-- **Real execution tools**: `execute_shell_command`, `fetch_url`, `read_file`, `write_file` (available to Developer, Task, and Swarm agents)
+Five agents use `ScopedToolNode` around LangGraph's `ToolNode`. Swarm workers use an application-controlled tool loop so each call can be checked against the active lease. All six use tool-bound `ChatOpenAI` models.
 
-The LLM decides when to call a tool (search memory, write back a result, execute a command), and the graph loops between the agent and tools nodes until the agent produces a final response.
+Memory tools query or update domain records. Execution tools are available only to the Developer, Task, and Swarm agents as appropriate. File access stays inside the workspace, HTTP requires an HTTPS host allowlist, and shell execution is disabled in the Compose demo. Tool availability is separate from authorization and verified completion.
+
+The model selects proposed tool calls; application code binds trusted scope and enforces dispatch rules. A final model response is not proof that an external action succeeded.
 
 ### Bidirectional Memory
 Agents both read from and write to the memory engine. For example:
+
 - **Task Agent**: recalls past trajectories, executes a task, then stores the new trajectory with a success score
 - **Swarm Agent**: claims a task from the blackboard, processes it, and marks it complete
 - **Companion Agent**: retrieves user context, responds, then extracts and stores **user, self, and shared facts** with emotional valence and provenance
 
 ### Checkpointer (State Persistence)
-Every agent graph is compiled with a `PostgresSaver` checkpointer backed by a connection pool. Conversation state is persisted to PostgreSQL across invocations via `thread_id` configs. This enables:
-- Multi-turn conversations where the LLM sees previous messages
-- Fresh memory context injected each turn (updated system prompts)
-- Resumable agent runs after failures
+The CLI uses the deletion-aware `AsyncPostgresSaver` and scoped thread IDs. Graph builders also accept no saver for focused tests. A checkpoint records graph state, while long-term records are written through the memory engine.
+
+Multi-turn invocations reuse a thread within one run. Checkpointed runs default to synchronous durability, with 32 graph supersteps and five concurrent graph tasks. Application-owned pools close on CLI exit. PostgreSQL fan-out resume is tested at the native graph layer; the public `ScopedGraph.ainvoke` wrapper currently accepts new-turn dictionaries, not `Command` or `None` resume requests.
 
 ---
 
+## Six additional workflows
+
+The separate [extension service](EXTENSIONS.md) adds approval/resume, evidence-backed support, verified procedure promotion, incident timelines, a research evidence notebook, and restricted analytics. Every module runs an actual LangGraph workflow against PostgreSQL. Approval owns a durable checkpoint; the other workflows persist domain evidence and recompute bounded graphs.
+
+Approval commits an `applying` record before file I/O so retries cannot erase an attempted effect through editing or cancellation. Research checks extraction completeness as well as exact citations; omitted evidence cannot silently become a supported assertion. [Recovery and upgrade instructions](EXTENSIONS.md#recovery-and-limits) explain unresolved effects and older reports.
+
+Run all six twice in disposable local infrastructure, without provider credentials:
+
+```bash
+uv pip install --python .venv-tests/bin/python -r tests/requirements.txt
+make extensions-demo PYTHON=.venv-tests/bin/python ENGINE_PYTHON=.venv-engine/bin/python
+```
+
+The command creates and removes a PostgreSQL container and temporary graph workspace. It checks that the second run does not duplicate accepted records or rewrite local effects, and runs a scripted comparison using actual authorized procedure recall. Docker must be available. The original `make demo` remains the twelve-scenario, configured-provider path.
+
+See [operating commands and permissions](EXTENSIONS.md), [fixture contracts](demo_agents/extensions/CONTRACTS.md), and [implementation evidence](IMPLEMENTATION_PLAN.md). Scripted support/research use deliberately small claim vocabularies; these checks establish bounded semantics, not general natural-language entailment or production readiness.
+
 ## Limitations and Roadmap
 
-### Current Limitations
+| Area | Implemented | Still unproven or proposed |
+|------|-------------|---------------------------|
+| Memory | Domain retrieval/write-back, provenance, conflict closure, TTL filtering, forgetting | Accuracy of extracted claims, user correction UX, broad retention policy |
+| Context | Ranked retrieval, character-bounded complete turns, refreshed system message | Token-aware compaction, persistent history retention limits, prompt-injection resistance |
+| Control flow | Tool cycles, enterprise abstention, parallel workers, leases, separate approval/resume service | Handoffs and compiled worker subgraphs |
+| Recovery | Checkpoints, native fan-out resume, approval-host death/restart and local-file reconciliation | Arbitrary remote effects, historical 0.6 checkpoint resume, crash recovery across every original pattern |
+| Evaluation | Deterministic integration tests and model-dependent evaluation tools | Representative provider benchmarks, answer-quality baselines, operational load targets |
 
-- **Most agent graphs are linear 3-node pipelines** — they use tool calling with conditional routing; only the Swarm pattern uses a supervisor + Send API fan-out topology
-- **Limited fallback routing** — enterprise queries with no authorized policy abstain; other agents still need task-specific fallback policies
-- **No context window management** — the Companion agent ranks facts by salience + relevance, but does not yet prune by token budget
-- **Tools use synchronous HTTP** — real execution tools block the event loop; fine for a demo, not for production concurrency
+Companion forgetting removes that user's companion records and companion checkpoint threads and disables further companion recording. Extension evidence/checkpoints, workspace files, project/branch hook excerpts, exports, and backups have separate lifecycles. The extension host currently uses disposable data; a general retention/deletion service remains future work.
 
-### Production-Ready Enhancements
-
-| Enhancement | Patterns Affected | Description | Status |
-|-------------|------------------|-------------|--------|
-| **Bidirectional memory** | All | Agents write back facts, trajectories, and proficiency updates | Done |
-| **Tool calling** | All | Real HTTP requests, shell commands, file operations, code execution | Done |
-| **Checkpointer** | All | Persist conversation state across invocations via Postgres | Done |
-| **Conditional routing** | Enterprise, Tutor | Guard against empty retrievals; route to fallback nodes | Future |
-| **Sub-agents + Send API** | Swarm | Supervisor fans out to parallel worker subgraphs via Send API | Done |
-| **Context window management** | Companion | Rank facts by salience + query relevance; prune by limit | Done |
-| **AI self-model** | Companion | Companion builds a model of itself (subject=`self`), dynamic persona from memory state | Done |
-| **Shared relationship memory** | Companion | `subject=shared` facts capture the growing bond; common-interest surfacing | Done |
-| **Emotional scoring** | Companion | `valence`/`intensity` on facts; the graph remembers emotional weight | Done |
-| **Fact provenance** | Companion | Edges link to source episodes; trace any fact to where it was learned | Done |
-| **Entity/relation normalization** | Companion | Canonical entities + UPPER_SNAKE predicates fold instead of fragmenting | Done |
-| **Synthetic + trace evaluation** | Companion | `tools/` pipeline: replay real traces or synthetic ground truth; precision/recall | Done |
-
-See **[GUIDE.md](GUIDE.md)** for detailed architectural analysis of each pattern and production guidance.
+Graph depth and agent count are design choices, not maturity measures. Add a step or agent only when it improves a defined outcome and can be tested. The [extension curriculum](USE_CASES.md) connects each implemented workflow to its evidence and limitations.
 
 ---
 
 ## References
 
 - **pgvector**: https://github.com/pgvector/pgvector
-- **LangGraph**: https://github.com/langchain-ai/langgraph
+- **LangGraph workflows and agents**: https://docs.langchain.com/oss/python/langgraph/workflows-agents
+- **Context engineering**: https://docs.langchain.com/oss/python/langchain/context-engineering
+- **Modern agent API and migration**: https://docs.langchain.com/oss/python/migrate/langgraph-v1
 - **HNSW Index**: Malkov & Yashunin (2018). "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs." *IEEE TPAMI.*
 - **Reciprocal Rank Fusion**: Cormack et al. (2009). "Reciprocal Rank Fusion outperforms Condorcet and individual rank learning methods." *SIGIR.*
 - **Ebbinghaus Forgetting Curve**: Ebbinghaus, H. (1885). *Über das Gedächtnis.*

@@ -16,6 +16,10 @@ demo: seed
 test:
 	$(PYTHON) tests/run_isolated.py --engine-python $(ENGINE_PYTHON)
 test-unit: test
+extensions-demo:
+	$(PYTHON) tests/run_isolated.py --engine-python $(ENGINE_PYTHON) --extensions-demo
+extensions-eval:
+	$(PYTHON) -m demo_agents.extensions.evaluate --mode scripted --output /tmp/pg-extension-evaluation.json
 # Live model quality evaluation is explicit; this target runs deterministic logic checks.
 test-eval: test
 ci: test

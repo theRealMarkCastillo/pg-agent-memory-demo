@@ -1,28 +1,33 @@
 import os
 from datetime import datetime, timezone
 import operator
-from typing import TypedDict, Annotated
+from typing import Annotated
 import httpx
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.graph import StateGraph, END, add_messages
+from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.types import Send
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import SWARM_TOOLS
 from .checkpointer import get_checkpointer
-from .runtime import auth_headers, bound_args, prompt_messages, ScopedGraph
+from .runtime import (
+    AgentContext,
+    auth_headers,
+    bound_args,
+    prompt_messages,
+    ScopedGraph,
+)
 
 MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 
 
-class SwarmState(TypedDict):
+class SwarmState(MessagesState):
     workflow_id: str
     claim_mode: str  # "assigned" (supervisor pins task IDs) | "pull" (workers race via SKIP LOCKED)
     pending_tasks: list[dict]
     worker_task: dict
     agent_name: str
     reports: Annotated[list[str], operator.add]
-    messages: Annotated[list, add_messages]
     final_summary: str
     blackboard_state: str
 
@@ -31,6 +36,8 @@ llm = ChatOpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     api_key=os.getenv("LLM_API_KEY"),
     model=os.getenv("LLM_MODEL_NAME"),
+    timeout=60,
+    max_retries=2,
     temperature=0.4,
 )
 
@@ -203,7 +210,7 @@ async def worker_node(state: SwarmState):
 
         report = next(
             (
-                m.content
+                m.text
                 for m in reversed(messages)
                 if m.type == "ai" and not getattr(m, "tool_calls", None)
             ),
@@ -234,12 +241,12 @@ async def aggregate_node(state: SwarmState):
 
 
 def build_swarm_graph(checkpointer: BaseCheckpointSaver | None = None):
-    builder = StateGraph(SwarmState)
+    builder = StateGraph(SwarmState, context_schema=AgentContext)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("worker", worker_node)
     builder.add_node("aggregate", aggregate_node)
 
-    builder.set_entry_point("supervisor")
+    builder.add_edge(START, "supervisor")
     builder.add_conditional_edges("supervisor", assign_tasks, ["worker", "aggregate"])
     builder.add_edge("worker", "aggregate")
     builder.add_edge("aggregate", END)

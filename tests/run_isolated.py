@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,11 @@ def run(*args, **kwargs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine-python", default=sys.executable)
+    parser.add_argument(
+        "--extensions-demo",
+        action="store_true",
+        help="Run the offline extension demo twice instead of pytest",
+    )
     parser.add_argument("pytest_args", nargs="*")
     args = parser.parse_args()
     name = "memory-test-" + secrets.token_hex(5)
@@ -62,12 +68,15 @@ def main():
                         "task:read",
                         "swarm:read",
                         "swarm:write",
+                        "hooks:read",
+                        "hooks:write",
                     ],
                 }
             }
         ),
     )
     server = None
+    run_directory = tempfile.TemporaryDirectory(prefix=name + "-")
     try:
         run(
             "docker",
@@ -137,7 +146,7 @@ def main():
         env["MEMORY_ENGINE_TEST_URL"] = env["MEMORY_ENGINE_URL"] = (
             f"http://127.0.0.1:{api_port}"
         )
-        log = ROOT / "tests/.engine-test.log"
+        log = Path(run_directory.name) / "engine.log"
         with log.open("w") as output:
             server = subprocess.Popen(
                 [
@@ -172,8 +181,10 @@ def main():
                     time.sleep(0.1)
             if not ready:
                 raise RuntimeError("Test server failed to start: " + log.read_text())
-            result = subprocess.run(
-                [
+            command = (
+                [sys.executable, "-m", "demo_agents.extensions.demo", "--repeat", "2"]
+                if args.extensions_demo
+                else [
                     sys.executable,
                     "-m",
                     "pytest",
@@ -183,7 +194,10 @@ def main():
                     "--tb=short",
                     str(ROOT / "tests"),
                     *args.pytest_args,
-                ],
+                ]
+            )
+            result = subprocess.run(
+                command,
                 env=env,
                 cwd=ROOT,
             )
@@ -199,6 +213,7 @@ def main():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        run_directory.cleanup()
 
 
 if __name__ == "__main__":

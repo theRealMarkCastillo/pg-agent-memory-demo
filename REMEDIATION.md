@@ -3,7 +3,11 @@
 The review findings are covered by API, graph, database, and pipeline regressions in
 `tests/test_review_regressions.py`, `tests/test_agent_regressions.py`, and
 `tests/test_pipeline_regressions.py`, `tests/test_followup_regressions.py`, and
-`tests/test_main_sync_regressions.py`. Existing integration tests now run against
+`tests/test_main_sync_regressions.py`. The subsequent LangGraph modernization and
+six-workflow review add `tests/test_langgraph_v1.py`, `tests/test_extension_*.py`,
+and `tests/test_final_review_regressions.py`. The [final code/design report](DESIGN_REVIEW.md)
+records five corrected defects and the October 24 result: **207 passed, 1 skipped**.
+Existing integration tests now run against
 fresh data per test, and assert real outcomes instead of accepting empty results.
 
 ## Start or upgrade
@@ -13,9 +17,14 @@ fresh data per test, and assert real outcomes instead of accepting empty results
    overwrite an existing file. Do not commit or share either credential file.
 2. Run `make build` and `make up`. Startup applies versioned SQL migrations under
    an advisory lock and transaction. Schema changes also apply to existing volumes.
+   All migrations run, including extension migrations `004`–`010` even if the
+   extension host is not started. `009` creates a database role and requires
+   role-creating migration privileges. The supplied local Compose database user
+   has them; a production design must separate migration and runtime privileges.
 3. For a new demo database, run `make seed`, then `make demo`. Seeding uses the
    separate admin credential; model-driven agents receive the scoped demo token.
-   The companion demo performs a real full-user deletion at its end.
+   The companion demo deletes that user's companion records/checkpoints at its end
+   and disables companion recording; it does not delete the user's other domains.
 4. To use the API directly, send `Authorization: Bearer <token>`. `/health` alone
    is unauthenticated. Token configuration maps to permissions and allowed users,
    roles, projects/branches, workflows, and agents. A role request never grants a role.
@@ -29,6 +38,19 @@ fresh data per test, and assert real outcomes instead of accepting empty results
    provider weight changes behind an unchanged model name. Failed reindexing preserves
    the previous vectors and identity. Developer, enterprise, and trajectory vectors
    still require separate reingestion when changing the shared embedding configuration.
+
+Stop old application/graph hosts and back up valued database and workspace data
+before upgrading. LangGraph's saver applies its own checkpoint migrations. Use
+fresh thread IDs for the original demo; resuming historical 0.6 checkpoints remains
+unverified. See the [LangGraph upgrade boundary](GUIDE.md#upgrade-and-verification-boundary).
+Migration `010` introduces `applying` and `effect_started_at`; older extension
+hosts must not run against the upgraded approval lifecycle. Restart the updated
+extension host and reconcile pending effects through its authorized `/run` API.
+
+Research reports without `complete-labelled-evidence/2` remain stored but cannot
+be accepted or returned as trusted assertions. Generate a new report ID and
+review its current evidence. Do not retrofit protocol metadata onto old results.
+See [extension recovery and limits](EXTENSIONS.md#recovery-and-limits) for both upgrades.
 
 Existing duplicate symbols are retained in `migration_duplicate_symbols`, while
 only the newest version remains in the current symbol index. Duplicate active
@@ -48,8 +70,13 @@ are deleted with that user's memory. Do not describe legacy retained backups as 
 
 ## Memory and execution contracts
 
-- User deletion removes facts, all provenance links, episodes/chunks, ephemerals,
-  and namespaced PostgreSQL checkpoints. It also disables further recording.
+- Companion deletion removes that user's companion facts, provenance links,
+  episodes/chunks, ephemerals, and companion PostgreSQL checkpoint threads.
+  It also disables further companion recording. Other domains, extension evidence
+  and checkpoints, workspace files, and project/branch hook excerpts are outside
+  this endpoint's deletion boundary. Hook session removal has its own
+  [procedure](AGENT_HOOKS.md#verify-and-remove-memory); extensions currently require
+  disposable data because a general retention/deletion service is not implemented.
   POST `/companion/memory/{user_id}/resume` is an explicit application/user opt-in;
   the model has no resume tool. Generation checks reject delayed writes after deletion.
 - Companion graphs use the deletion-aware PostgreSQL saver or no saver. Their public
@@ -89,16 +116,22 @@ are deleted with that user's memory. Do not describe legacy retained backups as 
   does not mount the Docker socket. Container isolation is not a VM security boundary.
 - HTTP tools require an explicit HTTPS host allowlist and do not follow redirects.
   Allow only destinations authorized to receive model-supplied requests.
+- Extension approval commits an immutable effect attempt before local file I/O.
+  A retry acknowledges matching proposed content, or requires current evidence
+  before a fresh write. Conflicting content returns 409 and preserves the attempt.
+  Separate API and approval-node pools prevent waiting requests from starving
+  graph execution. Support expiry is checked against the clock after lock waits;
+  research requires complete labelled evidence for a one-sided conclusion.
 
 ## Verification
 
 Use separate environments for the pinned engine and test/agent dependencies:
 
 ```sh
-python3 -m venv .venv-engine
-.venv-engine/bin/pip install -r memory_engine/requirements.txt
-python3 -m venv .venv-tests
-.venv-tests/bin/pip install -r tests/requirements.txt
+uv venv --python 3.12 .venv-engine
+uv pip install --python .venv-engine/bin/python -r memory_engine/requirements.txt
+uv venv --python 3.12 .venv-tests
+uv pip install --python .venv-tests/bin/python -r tests/requirements.txt
 .venv-tests/bin/python tests/run_isolated.py --engine-python .venv-engine/bin/python
 ```
 
@@ -107,6 +140,17 @@ credentials, resets test data between integration cases, and removes the contain
 on exit. It also tests the real Docker shell boundary. Embeddings are deterministic
 lexical fixtures: passing establishes application logic, not real semantic quality.
 No production `.env` or remote provider credentials are loaded by this runner.
+
+The separate extension demonstration runs twice in the same disposable database
+and workspace and checks accepted record counts and applied-file modification times:
+
+```bash
+make extensions-demo PYTHON=.venv-tests/bin/python ENGINE_PYTHON=.venv-engine/bin/python
+```
+
+It also runs a scripted held-out comparison using authorized PostgreSQL procedure
+recall. The [review evidence](DESIGN_REVIEW.md#verification) distinguishes these
+checks from unrun live-provider, load, and remote-deployment validation.
 
 Run provider evaluations separately against a disposable stack, with `LIVE_LLM_EVAL=1`
 and explicitly supplied credentials. Extraction evaluation now matches canonical

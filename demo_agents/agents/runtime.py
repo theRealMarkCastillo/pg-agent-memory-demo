@@ -3,12 +3,42 @@
 import hashlib
 import os
 from contextvars import ContextVar
+from dataclasses import dataclass
 import httpx
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.prebuilt import ToolNode
+from langgraph.runtime import Runtime
 
 _memory_generation = ContextVar("memory_generation", default=None)
+
+SCOPE_KEYS = (
+    "user_id",
+    "project_id",
+    "git_branch",
+    "user_role",
+    "workflow_id",
+    "agent_id",
+    "agent_name",
+)
+DEFAULT_RECURSION_LIMIT = 32
+
+
+@dataclass(frozen=True)
+class AgentContext:
+    """Application-owned scope for one run, separate from checkpointed state.
+
+    Scope still appears in state for retrieval and backwards-compatible callers,
+    but tool dispatch uses this immutable snapshot rather than mutable state.
+    The caller must authenticate/authorize these inputs at the application edge.
+    """
+
+    scope: tuple[tuple[str, str], ...]
+
+    @classmethod
+    def from_input(cls, state):
+        return cls(tuple((key, state[key]) for key in SCOPE_KEYS if key in state))
 
 
 def auth_headers():
@@ -60,15 +90,7 @@ def prompt_messages(messages, max_chars=32000):
 
 def bound_args(state, args):
     result = dict(args)
-    for key in (
-        "user_id",
-        "project_id",
-        "git_branch",
-        "user_role",
-        "workflow_id",
-        "agent_id",
-        "agent_name",
-    ):
+    for key in SCOPE_KEYS:
         if key in state and key in result:
             result[key] = state[key]
     if "allowed_role" in result and "user_role" in state:
@@ -78,14 +100,19 @@ def bound_args(state, args):
 
 class ScopedToolNode:
     def __init__(self, tools):
-        self.node = ToolNode(tools)
+        # v1 defaults to catching argument errors only. Preserve the demo's
+        # recoverable tool-error messages; cancellation/interrupts still propagate.
+        self.node = ToolNode(tools, handle_tool_errors=Exception)
 
-    async def __call__(self, state, config):
+    async def __call__(
+        self, state, config: RunnableConfig, runtime: Runtime[AgentContext]
+    ):
         last = state["messages"][-1]
-        calls = [dict(tc, args=bound_args(state, tc["args"])) for tc in last.tool_calls]
+        scope = dict(runtime.context.scope)
+        calls = [dict(tc, args=bound_args(scope, tc["args"])) for tc in last.tool_calls]
         for tc in calls:
-            if tc["name"] == "search_trajectories" and "agent_id" in state:
-                tc["args"]["agent_id"] = state["agent_id"]
+            if tc["name"] == "search_trajectories" and "agent_id" in scope:
+                tc["args"]["agent_id"] = scope["agent_id"]
         # Deletion is exclusive within a tool batch. Never dispatch sibling writes.
         forget = next(
             (c for c in calls if c["name"] == "forget_companion_memory"), None
@@ -96,6 +123,7 @@ class ScopedToolNode:
                     state, messages=[last.model_copy(update={"tool_calls": [forget]})]
                 ),
                 config,
+                runtime=runtime,
             )
             result = response["messages"][0]
             failed = getattr(result, "status", None) == "error" or not str(
@@ -132,6 +160,7 @@ class ScopedToolNode:
         return await self.node.ainvoke(
             dict(state, messages=[last.model_copy(update={"tool_calls": calls})]),
             config,
+            runtime=runtime,
         )
 
 
@@ -145,7 +174,15 @@ class ScopedGraph:
         return self.graph.get_graph(**kwargs)
 
     async def ainvoke(self, state, config=None, **kwargs):
+        if "context" in kwargs:
+            raise ValueError(
+                "ScopedGraph constructs context from application-owned input"
+            )
+        context = AgentContext.from_input(state)
         config = dict(config or {})
+        # LangGraph v1's default is 1000 steps. Bound autonomous tool loops here.
+        config.setdefault("recursion_limit", DEFAULT_RECURSION_LIMIT)
+        config.setdefault("max_concurrency", 5)
         settings = dict(config.get("configurable", {}))
         if self.domain == "companion":
             identity = state["user_id"]
@@ -186,7 +223,11 @@ class ScopedGraph:
         config["configurable"] = settings
         token = _memory_generation.set(settings.get("memory_generation"))
         try:
-            result = await self.graph.ainvoke(state, config, **kwargs)
+            # Persist each superstep before dispatching the next. This does not
+            # make external tool effects exactly-once on checkpoint replay.
+            if self.saver is not None:
+                kwargs.setdefault("durability", "sync")
+            result = await self.graph.ainvoke(state, config, context=context, **kwargs)
         finally:
             _memory_generation.reset(token)
         if result.get("forgotten"):
