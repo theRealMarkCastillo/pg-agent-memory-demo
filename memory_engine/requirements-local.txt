@@ -1,0 +1,5 @@
+# Only for EMBEDDING_PROVIDER=local. Install with the CPU wheel index:
+#   pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-local.txt
+torch==2.5.1
+sentence-transformers==3.3.1
+transformers==4.57.6

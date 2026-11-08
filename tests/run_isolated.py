@@ -51,6 +51,7 @@ def main():
         MEMORY_TEST_RESET="1",
         RUN_DOCKER_SANDBOX_TEST="1",
         PYTHONDONTWRITEBYTECODE="1",
+        EMBEDDING_PROVIDER="remote",
         EMBEDDING_MODEL_NAME="deterministic-logic-fixture",
         MEMORY_AUTH_TOKENS=json.dumps(
             {

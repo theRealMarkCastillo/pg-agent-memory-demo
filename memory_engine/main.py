@@ -1,7 +1,9 @@
+import asyncio
 from fastapi import FastAPI, Depends
 from contextlib import asynccontextmanager
 from db import get_db_pool
 from auth import authorize, credentials
+from embedding import embedding_provider, get_embedding_client
 from fastapi.responses import JSONResponse
 from openai import OpenAIError
 from routers import developer, task_agent, enterprise, tutor, swarm, companion, hooks
@@ -11,6 +13,9 @@ from routers import developer, task_agent, enterprise, tutor, swarm, companion, 
 async def lifespan(app: FastAPI):
     app.state.credentials = credentials()
     app.state.pool = await get_db_pool()
+    if embedding_provider() == "local":
+        # Load the model before serving instead of blocking the first request.
+        await asyncio.to_thread(get_embedding_client)
     yield
     await app.state.pool.close()
 
