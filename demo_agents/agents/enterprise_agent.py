@@ -1,12 +1,12 @@
 import os
-from typing import TypedDict, Annotated
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage
-from langgraph.graph import StateGraph, END, add_messages
+from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import ENTERPRISE_TOOLS
 from .checkpointer import get_checkpointer
 from .runtime import (
+    AgentContext,
     auth_headers,
     refresh_messages,
     prompt_messages,
@@ -15,17 +15,18 @@ from .runtime import (
 )
 
 
-class AgentState(TypedDict):
+class AgentState(MessagesState):
     user_role: str
     query: str
     retrieved_docs: str
-    messages: Annotated[list, add_messages]
 
 
 llm = ChatOpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     api_key=os.getenv("LLM_API_KEY"),
     model=os.getenv("LLM_MODEL_NAME"),
+    timeout=60,
+    max_retries=2,
     temperature=0.3,
 )
 
@@ -112,12 +113,12 @@ def should_continue(state: AgentState):
 
 
 def build_enterprise_graph(checkpointer: BaseCheckpointSaver | None = None):
-    builder = StateGraph(AgentState)
+    builder = StateGraph(AgentState, context_schema=AgentContext)
     builder.add_node("search", search_policy_docs)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", ScopedToolNode(ENTERPRISE_TOOLS))
 
-    builder.set_entry_point("search")
+    builder.add_edge(START, "search")
     builder.add_edge("search", "agent")
     builder.add_conditional_edges(
         "agent", should_continue, {"tools": "tools", END: END}

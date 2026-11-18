@@ -32,8 +32,11 @@ async def isolated_database(request):
             database=database,
         )
         try:
+            await conn.execute("TRUNCATE ext_analytics_runs")
+            await conn.execute("TRUNCATE ext_research_documents,ext_research_reports CASCADE")
+            await conn.execute("TRUNCATE ext_policies,ext_assertions,ext_attempts,ext_incident_events,ext_incident_summaries CASCADE")
             await conn.execute(
-                "TRUNCATE dev_code_symbols,task_trajectories,enterprise_documents,tutor_skills,tutor_user_progress,swarm_blackboard,companion_graph_edges,companion_graph_nodes,companion_episodes,companion_ephemerals,companion_memory_state CASCADE"
+                "TRUNCATE ext_proposals,agent_hook_memories,dev_code_symbols,task_trajectories,enterprise_documents,tutor_skills,tutor_user_progress,swarm_blackboard,companion_graph_edges,companion_graph_nodes,companion_episodes,companion_ephemerals,companion_memory_state CASCADE"
             )
         finally:
             await conn.close()

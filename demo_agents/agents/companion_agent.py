@@ -1,8 +1,8 @@
 import os
 import json
-from typing import TypedDict, Annotated
+
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END, add_messages
+from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from .tools import COMPANION_TOOLS
 from .checkpointer import get_checkpointer
@@ -12,6 +12,7 @@ from .companion_extraction import (
     validate_termination,
 )
 from .runtime import (
+    AgentContext,
     auth_headers,
     refresh_messages,
     prompt_messages,
@@ -22,20 +23,21 @@ from .runtime import (
 MEMORY_ENGINE_URL = os.getenv("MEMORY_ENGINE_URL", "http://memory-engine:8000")
 
 
-class AgentState(TypedDict):
+class AgentState(MessagesState):
     user_id: str
     forgotten: bool
     memory_enabled: bool
     user_message: str
     retrieved_context: str
     extracted_facts: str
-    messages: Annotated[list, add_messages]
 
 
 llm = ChatOpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     api_key=os.getenv("LLM_API_KEY"),
     model=os.getenv("LLM_MODEL_NAME"),
+    timeout=60,
+    max_retries=2,
     temperature=0.7,
 )
 
@@ -45,6 +47,8 @@ extraction_llm = ChatOpenAI(
     base_url=os.getenv("LLM_BASE_URL"),
     api_key=os.getenv("LLM_API_KEY"),
     model=os.getenv("LLM_MODEL_NAME"),
+    timeout=60,
+    max_retries=2,
     temperature=0.0,
 )
 
@@ -197,7 +201,7 @@ def _last_assistant_content(messages) -> str:
         if getattr(m, "type", "") == "tool":
             continue
         if hasattr(m, "content") and m.content:
-            return m.content
+            return m.text
     return ""
 
 
@@ -215,7 +219,7 @@ async def extract_memory(state: AgentState):
     prompt = build_extraction_prompt(user_msg, agent_msg)
     try:
         response = await extraction_llm.ainvoke(prompt)
-        data = parse_extraction_response(response.content or "")
+        data = parse_extraction_response(response.text)
     except Exception:
         data = {}
 
@@ -283,13 +287,13 @@ def build_companion_graph(checkpointer: BaseCheckpointSaver | None = None):
         raise ValueError(
             "Companion persistence requires the deletion-aware PostgreSQL saver"
         )
-    builder = StateGraph(AgentState)
+    builder = StateGraph(AgentState, context_schema=AgentContext)
     builder.add_node("retrieve", retrieve_companion_context)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", ScopedToolNode(COMPANION_TOOLS))
     builder.add_node("extract", extract_memory)
 
-    builder.set_entry_point("retrieve")
+    builder.add_edge(START, "retrieve")
     builder.add_edge("retrieve", "agent")
     builder.add_conditional_edges(
         "agent",

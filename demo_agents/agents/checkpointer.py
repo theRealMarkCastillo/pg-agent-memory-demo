@@ -3,9 +3,7 @@ import logging
 import asyncio
 from contextlib import asynccontextmanager
 from psycopg.conninfo import make_conninfo
-from typing import Any
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.types import Send
 from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -16,31 +14,12 @@ _guard_pool_instance = None
 _pool_instance = None  # retained to prevent GC of the connection pool
 
 
-class SendSafeAsyncPostgresSaver(AsyncPostgresSaver):
-    """AsyncPostgresSaver that serializes the Send API's `pending_sends`.
+class DeletionAwareAsyncPostgresSaver(AsyncPostgresSaver):
+    """Fence companion checkpoint reads/writes by the current memory generation.
 
-    LangGraph stores `Send` objects in `checkpoint["pending_sends"]`, which the
-    stock `aput` writes via psycopg's Jsonb adapter (a plain `json.dumps`) and
-    crashes with "Object of type Send is not JSON serializable" (upstream issue
-    langchain-ai/langgraph#6456). We convert Send -> JSON-safe dict on write and
-    reconstruct Send objects on read.
+    Serialization and schema migrations belong to the upstream saver. LangGraph
+    v1 checkpoints no longer have the legacy ``pending_sends`` JSON field.
     """
-
-    @staticmethod
-    def _encode_pending_sends(checkpoint: dict[str, Any]) -> None:
-        sends = checkpoint.get("pending_sends")
-        if not sends:
-            return
-        checkpoint["pending_sends"] = [{"node": s.node, "arg": s.arg} for s in sends]
-
-    @staticmethod
-    def _decode_pending_sends(checkpoint: dict[str, Any]) -> None:
-        sends = checkpoint.get("pending_sends")
-        if not sends:
-            return
-        checkpoint["pending_sends"] = [
-            Send(s["node"], s["arg"]) if isinstance(s, dict) else s for s in sends
-        ]
 
     @asynccontextmanager
     async def memory_guard(self, config):
@@ -73,8 +52,6 @@ class SendSafeAsyncPostgresSaver(AsyncPostgresSaver):
         async with self.memory_guard(config) as allowed:
             if not allowed:
                 return config
-            checkpoint = dict(checkpoint)
-            self._encode_pending_sends(checkpoint)
             saved = await super().aput(config, checkpoint, metadata, new_versions)
             saved["configurable"] = {
                 **config.get("configurable", {}),
@@ -86,11 +63,6 @@ class SendSafeAsyncPostgresSaver(AsyncPostgresSaver):
         async with self.memory_guard(config) as allowed:
             if allowed:
                 await super().aput_writes(config, writes, task_id, task_path)
-
-    async def _load_checkpoint_tuple(self, value):
-        tup = await super()._load_checkpoint_tuple(value)
-        self._decode_pending_sends(tup.checkpoint)
-        return tup
 
 
 def _pg_conn_string():
@@ -126,7 +98,7 @@ async def get_checkpointer():
         try:
             await pool.open()
             await guard.open()
-            saver = SendSafeAsyncPostgresSaver(pool)
+            saver = DeletionAwareAsyncPostgresSaver(pool)
             saver.guard_pool = guard
             await saver.setup()
         except BaseException:
@@ -139,3 +111,12 @@ async def get_checkpointer():
             saver,
         )
         return saver
+
+
+async def close_checkpointer():
+    """Close application-owned pools at shutdown; a later build can reopen them."""
+    global _checkpointer_instance, _pool_instance, _guard_pool_instance
+    async with _setup_lock:
+        pools = (_pool_instance, _guard_pool_instance)
+        _checkpointer_instance = _pool_instance = _guard_pool_instance = None
+        await asyncio.gather(*(pool.close() for pool in pools if pool is not None))

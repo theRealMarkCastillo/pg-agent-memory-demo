@@ -78,7 +78,10 @@ async def seed_data(client: httpx.AsyncClient):
             "agent_id": "task-bot-2",
             "goal_description": "Write a Python script to count words without testing or saving to workspace",
             "action_sequence": [
-                {"action": "inline_eval", "note": "unverified snippet failed with SyntaxError"},
+                {
+                    "action": "inline_eval",
+                    "note": "unverified snippet failed with SyntaxError",
+                },
             ],
             "execution_result": "Failed due to untested syntax error.",
             "success_score": 0.20,
@@ -270,7 +273,7 @@ def _last_assistant_response(result: dict) -> str:
         if hasattr(m, "type") and m.type == "tool":
             continue
         if hasattr(m, "content") and m.content:
-            return m.content
+            return m.text
     return "[No response generated]"
 
 
@@ -374,7 +377,9 @@ async def run_demos():
     )
     print(f"Response:\n{_last_assistant_response(result2)}")
 
-    print("\n[Demo 5/6] Swarm Agent — Parallel Workers Pulling from a SKIP LOCKED Queue")
+    print(
+        "\n[Demo 5/6] Swarm Agent — Parallel Workers Pulling from a SKIP LOCKED Queue"
+    )
     print("-" * 40)
     swarm_app = await build_swarm_graph_with_checkpointer()
     # Pull mode: the supervisor only sizes the pool; workers are not told which task
@@ -490,7 +495,15 @@ async def seed_demo():
         await seed_data(client)
 
 
-if __name__ == "__main__":
+async def main():
+    from agents.checkpointer import close_checkpointer
     import sys
 
-    asyncio.run(seed_demo() if "--seed-only" in sys.argv else run_demos())
+    try:
+        await (seed_demo() if "--seed-only" in sys.argv else run_demos())
+    finally:
+        await close_checkpointer()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

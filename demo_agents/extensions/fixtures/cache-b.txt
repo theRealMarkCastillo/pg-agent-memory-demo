@@ -1,0 +1,2 @@
+CONTRADICT cache_reduces_latency: Synthetic cold-cache latency rose from 50 ms to 70 ms.
+This source does not establish that every cache configuration improves latency.

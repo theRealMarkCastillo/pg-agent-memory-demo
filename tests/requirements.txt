@@ -4,4 +4,4 @@ httpx==0.28.1
 asyncpg==0.29.0
 pgvector==0.2.5
 fastapi==0.111.0
--r ../demo_agents/requirements.txt
+-r ../demo_agents/extensions/requirements.txt
